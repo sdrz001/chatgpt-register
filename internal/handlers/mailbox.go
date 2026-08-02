@@ -81,7 +81,7 @@ func (h *Handler) fissionCount() int {
 func (h *Handler) mailboxRegisterCount(m models.Mailbox) int {
 	var n int64
 	q := h.DB.Model(&models.Registration{}).Where("mailbox_id = ? OR email = ?", m.ID, m.Email)
-	if pattern := emailalias.LikePattern(m.Email); pattern != "" {
+	for _, pattern := range emailalias.LikePatterns(m.Email) {
 		q = q.Or("email LIKE ? ESCAPE '\\'", pattern)
 	}
 	q.Count(&n)

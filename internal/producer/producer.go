@@ -21,10 +21,13 @@ import (
 	"sync"
 	"time"
 
+	"chatgpt-register/internal/codexoauth"
 	"chatgpt-register/internal/codexreg"
 	"chatgpt-register/internal/emailalias"
+	"chatgpt-register/internal/integrationcfg"
 	"chatgpt-register/internal/mailfetch"
 	"chatgpt-register/internal/models"
+	"chatgpt-register/internal/smsactivate"
 
 	"gorm.io/gorm"
 )
@@ -62,10 +65,15 @@ type Progress struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+type mailClient interface {
+	ListMessages(context.Context, mailfetch.Account, int) ([]mailfetch.Message, error)
+	GetMessage(context.Context, mailfetch.Account, string) (mailfetch.Message, error)
+}
+
 // Producer 单例，管理一次生产任务的生命周期与进度。
 type Producer struct {
 	db   *gorm.DB
-	mail *mailfetch.Client
+	mail mailClient
 
 	mu     sync.Mutex
 	prog   Progress
@@ -78,10 +86,20 @@ type Producer struct {
 	failed map[string]struct{}
 	pxMu   sync.Mutex
 	pxIdx  int
+
+	authorizeCodex func(context.Context, codexoauth.Input) (codexoauth.Tokens, error)
+	acquirePhone   func(context.Context, uint) (*codexoauth.PhoneSession, error)
+	newSMSClient   func(smsactivate.Config) (*smsactivate.Client, error)
 }
 
 func New(db *gorm.DB, mail *mailfetch.Client) *Producer {
-	return &Producer{db: db, mail: mail, inflight: map[string]uint{}, failed: map[string]struct{}{}}
+	producer := &Producer{
+		db: db, mail: mail, inflight: map[string]uint{}, failed: map[string]struct{}{},
+		authorizeCodex: codexoauth.Authorize,
+		newSMSClient:   func(config smsactivate.Config) (*smsactivate.Client, error) { return smsactivate.New(config) },
+	}
+	producer.acquirePhone = producer.acquireSMSPhone
+	return producer
 }
 
 // Start 启动一次生产（异步）。已在运行则返回错误。
@@ -98,6 +116,9 @@ func (p *Producer) Start(target int) error {
 	p.cancel = cancel
 	p.inflight = map[string]uint{}
 	p.failed = map[string]struct{}{}
+	p.pxMu.Lock()
+	p.pxIdx = 0
+	p.pxMu.Unlock()
 	p.prog = Progress{Running: true, Target: target, Pending: target, Message: "初始化…", UpdatedAt: time.Now()}
 	go p.run(ctx, target)
 	return nil
@@ -257,15 +278,16 @@ func (p *Producer) nextJob(cfg Config) (models.Mailbox, string, bool, bool) {
 	return models.Mailbox{}, "", false, false
 }
 
-// produceOne 完整生产一个账号：注册 ChatGPT → 生成 Codex agent identity → 入库。
+// produceOne 完整生产一个账号：注册 ChatGPT → 获取 accessToken → 入库。
 func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox, email string, isMother bool) error {
 	password := codexreg.GenPassword(16)
+	accountProxy := p.nextProxy(cfg)
 	note := ""
 	if !isMother {
 		note = "裂变(" + mb.Email + ")"
 	}
 	p.upsert(models.Registration{
-		Email: email, MailboxID: mb.ID, Password: password,
+		Email: email, MailboxID: mb.ID, Password: password, Proxy: accountProxy,
 		Status: "registering", IsMother: isMother, Note: note,
 	})
 
@@ -292,7 +314,7 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 	in := codexreg.Input{
 		Email:    email,
 		Password: password,
-		Proxy:    p.nextProxy(cfg),
+		Proxy:    accountProxy,
 		Headless: cfg.Headless,
 		Log: func(f string, a ...any) {
 			msg := fmt.Sprintf(f, a...)
@@ -321,16 +343,35 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 	appendLog("✓ 注册成功")
 	authBytes, _ := json.MarshalIndent(res.AuthJSON, "", "  ")
 	p.upsert(models.Registration{
-		Email: email, MailboxID: mb.ID, Password: password,
+		Email: email, MailboxID: mb.ID, Password: password, Proxy: accountProxy,
 		Status: "registered", IsMother: isMother, Note: note,
 		AuthData: string(authBytes), AccountID: res.AccountID,
 		UserID: res.UserID, PlanType: res.PlanType, Log: logBuf.String(),
 	})
+	values, configErr := integrationcfg.Load(p.db)
+	if configErr != nil {
+		appendLog("⚠ 读取后置集成配置失败: " + configErr.Error())
+		return nil
+	}
+	if values.CodexAutoAuthorize() {
+		var registration models.Registration
+		if err := p.db.Select("id").Where("email = ?", email).First(&registration).Error; err != nil {
+			appendLog("⚠ Codex OAuth 自动授权跳过: " + err.Error())
+			return nil
+		}
+		if _, err := p.AuthorizeCodex(ctx, registration.ID); err != nil {
+			p.logf("⚠ %s ChatGPT 已注册，Codex OAuth 自动授权失败：%v", mask(email), err)
+		}
+	}
 	return nil
 }
 
 // fetchCode 轮询邮箱，从 OpenAI/ChatGPT 验证邮件里提取 6 位验证码。
 func (p *Producer) fetchCode(ctx context.Context, mb models.Mailbox, since time.Time) (string, error) {
+	return p.fetchCodeAfter(ctx, mb, since, nil)
+}
+
+func (p *Producer) fetchCodeAfter(ctx context.Context, mb models.Mailbox, since time.Time, ignoredIDs map[string]struct{}) (string, error) {
 	acc := mailfetch.Account{Email: mb.Email, ClientID: mb.ClientID, RefreshToken: mb.RefreshToken}
 	deadline := time.Now().Add(codePollTimeout)
 	for time.Now().Before(deadline) {
@@ -340,7 +381,7 @@ func (p *Producer) fetchCode(ctx context.Context, mb models.Mailbox, since time.
 		msgs, err := p.mail.ListMessages(ctx, acc, 15)
 		if err == nil {
 			for _, m := range msgs {
-				if m.ReceivedAt.Before(since) || !looksLikeOpenAI(m) {
+				if _, ignored := ignoredIDs[m.ID]; ignored || m.ReceivedAt.Before(since) || !looksLikeOpenAI(m) {
 					continue
 				}
 				if code := codeRe.FindStringSubmatch(m.Subject); code != nil {
@@ -446,8 +487,8 @@ func (p *Producer) fissionCount(mb models.Mailbox) int {
 }
 
 func (p *Producer) nextFissionEmail(base string) string {
-	for i := 1; i <= 999; i++ {
-		email := emailalias.Address(base, fmt.Sprintf("%03d", i))
+	for range 999 {
+		email := emailalias.Address(base, emailalias.RandomSuffix(8))
 		if email == base {
 			return ""
 		}
@@ -508,6 +549,7 @@ func (p *Producer) upsert(reg models.Registration) {
 		updates := map[string]any{
 			"password": reg.Password, "status": reg.Status,
 			"is_mother": reg.IsMother, "note": reg.Note, "mailbox_id": reg.MailboxID,
+			"proxy": reg.Proxy,
 		}
 		if reg.AuthData != "" {
 			updates["auth_data"] = reg.AuthData

@@ -24,15 +24,33 @@ type exportAccount struct {
 	Credentials map[string]any `json:"credentials"`
 }
 
-// buildCredentials 把库里存的 auth.json（agent_identity 结构）映射成导出用的 credentials。
+// buildCredentials 把库里存的 auth.json 映射成导出用的 credentials。
+// 兼容新 access_token 结构与旧 agent_identity 结构。
 func buildCredentials(authData, email string) map[string]any {
 	var parsed map[string]any
 	_ = json.Unmarshal([]byte(authData), &parsed)
-	ai, _ := parsed["agent_identity"].(map[string]any)
-	if ai == nil {
-		ai = map[string]any{}
+	if parsed == nil {
+		parsed = map[string]any{}
 	}
-	str := func(k string) string { s, _ := ai[k].(string); return s }
+
+	// 优先顶层字段（新格式）；旧格式回退到 agent_identity 嵌套。
+	src := parsed
+	if ai, ok := parsed["agent_identity"].(map[string]any); ok && ai != nil {
+		if _, hasAT := parsed["access_token"]; !hasAT {
+			src = ai
+		}
+	}
+	str := func(keys ...string) string {
+		for _, k := range keys {
+			if s, ok := src[k].(string); ok && s != "" {
+				return s
+			}
+			if s, ok := parsed[k].(string); ok && s != "" {
+				return s
+			}
+		}
+		return ""
+	}
 	planType := str("plan_type")
 	if planType == "" {
 		planType = "free"
@@ -41,17 +59,39 @@ func buildCredentials(authData, email string) map[string]any {
 	if em == "" {
 		em = email
 	}
-	fedramp, _ := ai["chatgpt_account_is_fedramp"].(bool)
-	return map[string]any{
-		"agent_private_key":          str("agent_private_key"),
-		"agent_runtime_id":           str("agent_runtime_id"),
-		"auth_mode":                  "agentIdentity",
-		"chatgpt_account_id":         str("account_id"),
-		"chatgpt_account_is_fedramp": fedramp,
-		"chatgpt_user_id":            str("chatgpt_user_id"),
-		"email":                      em,
-		"plan_type":                  planType,
+	authMode := str("auth_mode")
+	if authMode == "" {
+		if str("access_token") != "" {
+			authMode = "accessToken"
+		} else {
+			authMode = "agentIdentity"
+		}
 	}
+	out := map[string]any{
+		"auth_mode":          authMode,
+		"access_token":       str("access_token"),
+		"chatgpt_account_id": str("account_id", "chatgpt_account_id"),
+		"chatgpt_user_id":    str("chatgpt_user_id", "user_id"),
+		"email":              em,
+		"plan_type":          planType,
+	}
+	for _, key := range []string{"refresh_token", "id_token", "expires_at"} {
+		if value := str(key); value != "" {
+			out[key] = value
+		}
+	}
+	if value, ok := src["expires_in"]; ok {
+		out["expires_in"] = value
+	} else if value, ok := parsed["expires_in"]; ok {
+		out["expires_in"] = value
+	}
+	if v := str("agent_private_key"); v != "" {
+		out["agent_private_key"] = v
+	}
+	if v := str("agent_runtime_id"); v != "" {
+		out["agent_runtime_id"] = v
+	}
+	return out
 }
 
 // Produce 启动一次生产：{ "count": N }。
@@ -126,6 +166,46 @@ func (h *Handler) RegistrationShot(c *gin.Context) {
 // 出库状态只能由下载接口自动标记，避免库存状态被人工改乱。
 func (h *Handler) SetShipped(c *gin.Context) {
 	c.JSON(http.StatusForbidden, gin.H{"error": "出库状态已锁定，只能由下载操作自动更新"})
+}
+
+func (h *Handler) AccessTokens(c *gin.Context) {
+	var in struct {
+		IDs []uint `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(in.IDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "未选择账号"})
+		return
+	}
+
+	var regs []models.Registration
+	if err := h.DB.Where("id IN ? AND status = ? AND auth_data <> ''", in.IDs, "registered").
+		Order("id").Find(&regs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	tokens := make([]string, 0, len(regs))
+	for _, reg := range regs {
+		credentials := buildCredentials(reg.AuthData, reg.Email)
+		token, _ := credentials["access_token"].(string)
+		if token != "" {
+			tokens = append(tokens, token)
+		}
+	}
+	if len(tokens) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "所选账号没有可复制的 AT"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"tokens":  tokens,
+		"count":   len(tokens),
+		"skipped": len(in.IDs) - len(tokens),
+	})
 }
 
 // Download 下载选中账号的 auth.json：单个→对象，多个→数组；下载即标记出库。

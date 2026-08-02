@@ -76,6 +76,122 @@
 
       <div class="px-panel settings-card">
         <div class="settings-head">
+          <span class="settings-icon blue">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.9.33 1.78.62 2.63a2 2 0 0 1-.45 2.11L8 9.73a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.85.29 1.73.5 2.63.62A2 2 0 0 1 22 16.92z"/></svg>
+          </span>
+          <div>
+            <h2>Codex OAuth 与动态接码</h2>
+            <p>授权需要新手机号时按需购买，不提前扣费</p>
+          </div>
+        </div>
+        <label class="switch-row">
+          <input id="set-codex-auto-authorize" type="checkbox">
+          <span class="switch-ui"></span>
+          <span class="switch-label">注册成功后自动获取 Codex OAuth</span>
+        </label>
+        <div class="settings-form-grid">
+          <div class="field">
+            <label>接码平台</label>
+            <select id="set-sms-platform" class="px-input">
+              <option value="hero-sms">Hero SMS</option>
+              <option value="smsbower">SMSBower</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>API Key</label>
+            <span id="sms-api-key-hint" class="field-hint">尚未配置</span>
+            <input id="set-sms-api-key" class="px-input" type="password" autocomplete="new-password" placeholder="留空保留已保存密钥">
+          </div>
+          <div class="field">
+            <label>国家</label>
+            <select id="set-sms-country" class="px-input">
+              <option value="random">随机候选国家</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>随机候选国家 ID</label>
+            <span class="field-hint">逗号分隔，仅随机模式使用</span>
+            <input id="set-sms-random-countries" class="px-input" placeholder="187,16,36,43">
+          </div>
+          <div class="field">
+            <label>最高单价</label>
+            <div class="input-suffix">
+              <input id="set-sms-max-price" class="px-input" type="number" min="0.01" max="5" step="0.01">
+              <span class="suffix">$</span>
+            </div>
+          </div>
+          <div class="field">
+            <label>收码超时</label>
+            <div class="input-suffix">
+              <input id="set-sms-timeout" class="px-input" type="number" min="30" max="600">
+              <span class="suffix">秒</span>
+            </div>
+          </div>
+        </div>
+        <div id="sms-balance-result" class="proxy-result" style="display:none"></div>
+        <div class="settings-foot">
+          <button id="sms-balance-btn" class="px-btn ghost" onclick="testSMSBalance()">查询余额</button>
+          <button class="px-btn primary" onclick="saveSMSSettings()">保存 Codex / 接码</button>
+        </div>
+      </div>
+
+      <div class="px-panel settings-card">
+        <div class="settings-head">
+          <span class="settings-icon violet">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg>
+          </span>
+          <div>
+            <h2>Sub2API</h2>
+            <p>Codex OAuth 成功后按邮箱创建或更新远端账号</p>
+          </div>
+        </div>
+        <label class="switch-row">
+          <input id="set-sub2api-auto-import" type="checkbox">
+          <span class="switch-ui"></span>
+          <span class="switch-label">自动导入 Sub2API</span>
+        </label>
+        <div class="settings-form-grid">
+          <div class="field settings-span-2">
+            <label>Sub2API 地址</label>
+            <input id="set-sub2api-url" class="px-input" placeholder="https://sub2api.example.com">
+          </div>
+          <div class="field settings-span-2">
+            <label>Admin API Key</label>
+            <span id="sub2api-key-hint" class="field-hint">尚未配置</span>
+            <input id="set-sub2api-api-key" class="px-input" type="password" autocomplete="new-password" placeholder="留空保留已保存密钥">
+          </div>
+          <div class="field">
+            <label>账号并发数</label>
+            <input id="set-sub2api-concurrency" class="px-input" type="number" min="1" max="100">
+          </div>
+          <div class="field">
+            <label>优先级</label>
+            <input id="set-sub2api-priority" class="px-input" type="number" min="1" max="100">
+          </div>
+          <div class="field">
+            <label>请求超时</label>
+            <div class="input-suffix">
+              <input id="set-sub2api-timeout" class="px-input" type="number" min="5" max="300">
+              <span class="suffix">秒</span>
+            </div>
+          </div>
+          <div class="field settings-span-2">
+            <div class="field-label-row">
+              <label>远端分类</label>
+              <span id="sub2api-group-count" class="count-badge">已选 0 个</span>
+            </div>
+            <span class="field-hint">先填写地址和 Admin Key，再拉取全部分类；按 Ctrl / Command 多选</span>
+            <select id="set-sub2api-group-ids" class="settings-multi" multiple size="7" onchange="updateSub2APIGroupCount()"></select>
+          </div>
+        </div>
+        <div class="settings-foot">
+          <button id="sub2api-groups-btn" class="px-btn ghost" onclick="loadSub2APIGroups()">拉取全部分类</button>
+          <button class="px-btn primary" onclick="saveSub2APISettings()">保存 Sub2API</button>
+        </div>
+      </div>
+
+      <div class="px-panel settings-card">
+        <div class="settings-head">
           <span class="settings-icon amber">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
           </span>
@@ -115,7 +231,25 @@ async function loadSettings() {
   document.getElementById('set-fission-count').value = d.fission_count || '5';
   document.getElementById('set-proxy-enabled').checked = d.proxy_enabled === '1';
   document.getElementById('set-proxy-list').value = d.proxy_list || '';
+  document.getElementById('set-codex-auto-authorize').checked = d.codex_auto_authorize === '1';
+  document.getElementById('set-sms-platform').value = d.sms_platform || 'hero-sms';
+  document.getElementById('set-sms-api-key').value = '';
+  document.getElementById('sms-api-key-hint').textContent = d.sms_api_key_configured === '1' ? '已保存 API Key；留空保持不变' : '尚未配置';
+  document.getElementById('set-sms-country').value = d.sms_country || 'random';
+  document.getElementById('set-sms-random-countries').value = d.sms_random_countries || '187,16,36,43';
+  document.getElementById('set-sms-max-price').value = d.sms_max_price || '0.5';
+  document.getElementById('set-sms-timeout').value = d.sms_timeout || '180';
+  document.getElementById('set-sub2api-auto-import').checked = d.sub2api_auto_import === '1';
+  document.getElementById('set-sub2api-url').value = d.sub2api_url || '';
+  document.getElementById('set-sub2api-api-key').value = '';
+  document.getElementById('sub2api-key-hint').textContent = d.sub2api_api_key_configured === '1' ? '已保存 Admin Key；留空保持不变' : '尚未配置';
+  document.getElementById('set-sub2api-concurrency').value = d.sub2api_concurrency || '10';
+  document.getElementById('set-sub2api-priority').value = d.sub2api_priority || '1';
+  document.getElementById('set-sub2api-timeout').value = d.sub2api_timeout || '60';
+  fillSub2APIGroups([], parseIDList(d.sub2api_group_ids));
   updateProxyCount();
+  syncSelect('set-sms-platform');
+  syncSelect('set-sms-country');
 }
 
 function proxyLines() {
@@ -151,7 +285,7 @@ async function testProxy() {
     const d = await r.json().catch(() => ({}));
     if (r.ok && d.ok) {
       box.className = 'proxy-result ok';
-      box.innerHTML = '✓ 代理可用 · 出口 IP <b>' + (d.ip || '未知') + '</b> · ' + (d.ms || 0) + ' ms';
+      box.textContent = '✓ 代理可用 · 出口 IP ' + (d.ip || '未知') + ' · ' + (d.ms || 0) + ' ms';
     } else {
       box.className = 'proxy-result fail';
       box.textContent = '✗ 代理不可用：' + (d.error || '连接失败');
@@ -184,13 +318,154 @@ async function saveSettings() {
     max_concurrency: document.getElementById('set-max-concurrency').value.trim(),
     fission_count: document.getElementById('set-fission-count').value.trim(),
   };
-  const r = await api('/api/settings', {
+  const r = await saveSettingBody(body);
+  if (!r.ok) return toast('保存失败', true);
+  toast('设置已保存');
+}
+
+function parseIDList(raw) {
+  return String(raw || '').split(',').map(v => Number.parseInt(v.trim(), 10)).filter(Number.isInteger);
+}
+
+function selectedSub2APIGroupIDs() {
+  return [...document.getElementById('set-sub2api-group-ids').selectedOptions].map(option => Number(option.value));
+}
+
+function updateSub2APIGroupCount() {
+  document.getElementById('sub2api-group-count').textContent = '已选 ' + selectedSub2APIGroupIDs().length + ' 个';
+}
+
+function fillSub2APIGroups(groups, selectedIDs) {
+  const selected = new Set((selectedIDs || []).map(Number));
+  const options = (groups || []).map(group => {
+    const id = Number(group.id);
+    return '<option value="' + id + '" ' + (selected.has(id) ? 'selected' : '') + '>' + esc('#' + id + ' · ' + (group.name || '未命名')) + '</option>';
+  });
+  selected.forEach(id => {
+    if (!(groups || []).some(group => Number(group.id) === id)) options.push('<option value="' + id + '" selected>#' + id + ' · 已保存分类</option>');
+  });
+  document.getElementById('set-sub2api-group-ids').innerHTML = options.join('');
+  updateSub2APIGroupCount();
+}
+
+async function saveSettingBody(body) {
+  return api('/api/settings', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!r.ok) return toast('保存失败', true);
-  toast('设置已保存');
+}
+
+async function saveSMSSettings() {
+  const price = Number(document.getElementById('set-sms-max-price').value);
+  const timeout = Number.parseInt(document.getElementById('set-sms-timeout').value, 10);
+  const country = document.getElementById('set-sms-country').value;
+  const candidates = parseIDList(document.getElementById('set-sms-random-countries').value);
+  if (!(price > 0 && price <= 5)) return toast('最高单价必须在 0 到 5 美元之间', true);
+  if (!Number.isInteger(timeout) || timeout < 30 || timeout > 600) return toast('收码超时必须在 30 到 600 秒之间', true);
+  if (country === 'random' && !candidates.length) return toast('随机国家候选列表不能为空', true);
+  const body = {
+    codex_auto_authorize: document.getElementById('set-codex-auto-authorize').checked ? '1' : '0',
+    sms_platform: document.getElementById('set-sms-platform').value,
+    sms_api_key: document.getElementById('set-sms-api-key').value.trim(),
+    sms_country: country,
+    sms_random_countries: candidates.join(','),
+    sms_max_price: String(price),
+    sms_timeout: String(timeout),
+  };
+  const r = await saveSettingBody(body);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '保存失败', true);
+  if (body.sms_api_key) {
+    document.getElementById('set-sms-api-key').value = '';
+    document.getElementById('sms-api-key-hint').textContent = '已保存 API Key；留空保持不变';
+  }
+  toast('Codex / 接码配置已保存');
+}
+
+async function testSMSBalance() {
+  const key = document.getElementById('set-sms-api-key').value.trim();
+  const box = document.getElementById('sms-balance-result');
+  const btn = document.getElementById('sms-balance-btn');
+  btn.disabled = true;
+  box.style.display = 'flex';
+  box.className = 'proxy-result testing';
+  box.innerHTML = '<span class="spinner"></span> 正在查询余额…';
+  try {
+    const r = await api('/api/sms-platform/balance', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: document.getElementById('set-sms-platform').value, api_key: key }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      box.className = 'proxy-result fail';
+      box.textContent = d.error || '查询失败';
+      return;
+    }
+    box.className = 'proxy-result ok';
+    box.textContent = '余额：$' + d.balance;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function saveSub2APISettings() {
+  const concurrency = Number.parseInt(document.getElementById('set-sub2api-concurrency').value, 10);
+  const priority = Number.parseInt(document.getElementById('set-sub2api-priority').value, 10);
+  const timeout = Number.parseInt(document.getElementById('set-sub2api-timeout').value, 10);
+  const url = document.getElementById('set-sub2api-url').value.trim();
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 100) return toast('Sub2API 并发数必须在 1 到 100 之间', true);
+  if (!Number.isInteger(priority) || priority < 1 || priority > 100) return toast('Sub2API 优先级必须在 1 到 100 之间', true);
+  if (!Number.isInteger(timeout) || timeout < 5 || timeout > 300) return toast('Sub2API 超时必须在 5 到 300 秒之间', true);
+  if (document.getElementById('set-sub2api-auto-import').checked && !url) return toast('启用自动导入时必须填写 Sub2API 地址', true);
+  const body = {
+    sub2api_auto_import: document.getElementById('set-sub2api-auto-import').checked ? '1' : '0',
+    sub2api_url: url,
+    sub2api_api_key: document.getElementById('set-sub2api-api-key').value.trim(),
+    sub2api_group_ids: selectedSub2APIGroupIDs().join(','),
+    sub2api_concurrency: String(concurrency),
+    sub2api_priority: String(priority),
+    sub2api_timeout: String(timeout),
+  };
+  const r = await saveSettingBody(body);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '保存失败', true);
+  if (body.sub2api_api_key) {
+    document.getElementById('set-sub2api-api-key').value = '';
+    document.getElementById('sub2api-key-hint').textContent = '已保存 Admin Key；留空保持不变';
+  }
+  toast('Sub2API 配置已保存');
+}
+
+async function loadSub2APIGroups() {
+  const url = document.getElementById('set-sub2api-url').value.trim();
+  if (!url) return toast('请先填写 Sub2API 地址', true);
+  const btn = document.getElementById('sub2api-groups-btn');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/sub2api/groups', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, api_key: document.getElementById('set-sub2api-api-key').value.trim() }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) return toast(d.error || '分类加载失败', true);
+    fillSub2APIGroups(d.groups || [], selectedSub2APIGroupIDs());
+    toast('已加载 ' + (d.groups || []).length + ' 个分类');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function loadSMSMeta() {
+  const r = await api('/api/sms-platform/meta');
+  if (!r.ok) return;
+  const d = await r.json();
+  const select = document.getElementById('set-sms-country');
+  const current = select.value;
+  select.innerHTML = '<option value="random">随机候选国家</option>' + (d.countries || []).map(country =>
+    '<option value="' + country.id + '">' + esc(country.code + ' · ' + country.label) + '</option>').join('');
+  select.value = current || 'random';
+  if (select._rebuild) select._rebuild();
 }
 
 async function changePassword() {
@@ -214,7 +489,7 @@ async function changePassword() {
   toast('密码已修改');
 }
 
-loadSettings();
+loadSMSMeta().then(loadSettings);
 </script>
 </body>
 </html>

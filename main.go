@@ -63,7 +63,10 @@ func main() {
 		api.GET("/registrations/:id/logs", h.RegistrationLog)
 		api.GET("/registrations/:id/shot", h.RegistrationShot)
 		api.PUT("/registrations/:id/shipped", h.SetShipped)
+		api.POST("/registrations/:id/codex-authorize", h.RegistrationCodexAuthorize)
+		api.POST("/registrations/:id/sub2api-import", h.RegistrationSub2APIImport)
 		api.POST("/download", h.Download)
+		api.POST("/access-tokens", h.AccessTokens)
 
 		api.POST("/produce", h.Produce)
 		api.GET("/produce/status", h.ProduceStatus)
@@ -81,6 +84,9 @@ func main() {
 
 		api.GET("/settings", h.SettingsGet)
 		api.PUT("/settings", h.SettingsSave)
+		api.GET("/sms-platform/meta", h.SMSPlatformMeta)
+		api.POST("/sms-platform/balance", h.SMSPlatformBalance)
+		api.POST("/sub2api/groups", h.Sub2APIGroups)
 
 		api.POST("/proxy/test", h.ProxyTest)
 	}

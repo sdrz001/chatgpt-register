@@ -6,6 +6,18 @@ const ACC_STATUS = {
   register_failed: '注册失败',
   already_registered: '停用',
 };
+const CODEX_STATUS = {
+  pending: '待授权',
+  authorizing: '授权中',
+  authorized: '已授权',
+  failed: '授权失败',
+};
+const SUB2API_STATUS = {
+  not_imported: '未导入',
+  importing: '导入中',
+  imported: '已导入',
+  failed: '导入失败',
+};
 let page = 1;
 const size = 20;
 let accCache = {};
@@ -24,7 +36,7 @@ async function load() {
   accTotal = d.total || 0;
   (d.data || []).forEach(x => { accCache[x.id] = x; });
   document.getElementById('rows').innerHTML = (d.data || []).map(rowHtml).join('')
-    || '<tr><td colspan="6" style="text-align:center;color:var(--text-3)">暂无数据</td></tr>';
+    || '<tr><td colspan="8" style="text-align:center;color:var(--text-3)">暂无数据</td></tr>';
   const maxPage = Math.max(1, Math.ceil((d.total || 0) / size));
   renderPager('pager', page, maxPage, p => { page = p; load(); });
   syncBatchBar();
@@ -32,18 +44,34 @@ async function load() {
 
 function rowHtml(x) {
   const canDownload = x.status === 'registered';
+  const canCopyAT = x.status === 'registered';
+  const canAuthorizeCodex = x.status === 'registered' && x.codex_status !== 'authorizing';
+  const canImportSub2API = x.status === 'registered' && x.codex_status === 'authorized' && x.sub2api_status !== 'importing';
+  const codexTitle = x.codex_error ? esc(x.codex_error) : '';
+  const sub2apiTitle = x.sub2api_error ? esc(x.sub2api_error) : (x.sub2api_account_id ? '远端账号 #' + x.sub2api_account_id : '');
   return `
     <tr class="${accSelected.has(x.id) ? 'row-sel' : ''}">
       <td class="col-check"><input type="checkbox" ${accSelected.has(x.id) ? 'checked' : ''} onclick="toggleSelect(${x.id}, this.checked)"></td>
       <td>${esc(x.email)}</td>
       <td>${fmtTime(x.created_at)}</td>
       <td><span class="badge ${esc(x.status)}">${ACC_STATUS[x.status] || esc(x.status)}</span></td>
+      <td><span class="badge ${esc(x.codex_status || 'pending')}" title="${codexTitle}">${CODEX_STATUS[x.codex_status] || '待授权'}</span></td>
+      <td><span class="badge ${esc(x.sub2api_status || 'not_imported')}" title="${sub2apiTitle}">${SUB2API_STATUS[x.sub2api_status] || '未导入'}</span></td>
       <td class="ship-cell">
         <span class="badge ${x.shipped ? 'registered' : 'pending'}" title="下载后自动标记，不能手动修改">${x.shipped ? '已出库' : '未出库'}</span>
       </td>
       <td>
         <button class="icon-btn" title="日志" onclick="showLog(${x.id})">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></svg>
+        </button>
+        <button class="icon-btn" title="复制 AT" ${canCopyAT ? '' : 'disabled'} onclick="copyAccAT(${x.id})">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+        <button class="icon-btn" title="${x.codex_status === 'authorized' ? '重新获取 Codex OAuth' : '获取 Codex OAuth'}" ${canAuthorizeCodex ? '' : 'disabled'} onclick="authorizeCodex(${x.id})">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15 8l3 3M18 5l3 3"/></svg>
+        </button>
+        <button class="icon-btn" title="${x.sub2api_status === 'imported' ? '更新 Sub2API' : '导入 Sub2API'}" ${canImportSub2API ? '' : 'disabled'} onclick="importSub2API(${x.id})">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
         </button>
         <button class="icon-btn" title="下载" ${canDownload ? '' : 'disabled'} onclick="downloadAcc(${x.id})">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
@@ -190,7 +218,81 @@ function syncBatchBar() {
   all.checked = ids.length > 0 && ids.every(id => accSelected.has(id));
 }
 
-/* ===== 下载（agent_identity JSON，单个→对象，多个→数组；下载即出库） ===== */
+/* ===== 复制 AT（按所选顺序，一行一个） ===== */
+async function copySelectedAT() {
+  const ids = [...accSelected];
+  if (!ids.length) return;
+  const r = await api('/api/access-tokens', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '读取 AT 失败', true);
+  const tokens = Array.isArray(d.tokens) ? d.tokens.filter(Boolean) : [];
+  if (!tokens.length) return toast('所选账号没有可复制的 AT', true);
+  try {
+    await copyText(tokens.join('\n'));
+  } catch (e) {
+    return toast('复制失败，请检查浏览器剪贴板权限', true);
+  }
+  const skipped = Number(d.skipped) || 0;
+  toast('已复制 ' + tokens.length + ' 个 AT' + (skipped ? '，跳过 ' + skipped + ' 项' : ''));
+}
+
+async function copyAccAT(id) {
+  const r = await api('/api/access-tokens', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: [id] }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '读取 AT 失败', true);
+  const tokens = Array.isArray(d.tokens) ? d.tokens.filter(Boolean) : [];
+  if (!tokens.length) return toast('该账号没有可复制的 AT', true);
+  try {
+    await copyText(tokens[0]);
+  } catch (e) {
+    return toast('复制失败，请检查浏览器剪贴板权限', true);
+  }
+  toast('AT 已复制');
+}
+
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+  if (!copied) throw new Error('copy failed');
+}
+
+/* ===== Codex OAuth / Sub2API ===== */
+async function authorizeCodex(id) {
+  if (!confirm('开始获取该账号的 Codex OAuth？授权过程中可能按需购买接码号码。')) return;
+  const r = await api('/api/registrations/' + id + '/codex-authorize', { method: 'POST' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || 'Codex 授权失败', true);
+  toast('Codex OAuth 已获取');
+  load();
+}
+
+async function importSub2API(id) {
+  const r = await api('/api/registrations/' + id + '/sub2api-import', { method: 'POST' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || 'Sub2API 导入失败', true);
+  toast('Sub2API ' + (d.action === 'updated' ? '更新' : '导入') + '成功 · 远端账号 #' + d.account_id);
+  load();
+}
+
+/* ===== 下载（auth JSON，单个→对象，多个→数组；下载即出库） ===== */
 async function downloadAcc(id) {
   await downloadByIds([id], 'auth_' + id + '.json');
 }

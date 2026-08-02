@@ -1,6 +1,7 @@
 package emailalias
 
 import (
+	"math/rand/v2"
 	"strconv"
 	"strings"
 )
@@ -12,6 +13,9 @@ func Base(address string) string {
 		return address
 	}
 	local := address[:at]
+	if plus := strings.Index(local, "+"); plus > 0 {
+		return local[:plus] + address[at:]
+	}
 	dash := strings.LastIndex(local, "-")
 	if dash < 1 {
 		return address
@@ -32,16 +36,27 @@ func Address(base string, suffix string) string {
 	if suffix == "" {
 		return base
 	}
-	return base[:at] + "-" + suffix + base[at:]
+	return base[:at] + "+" + suffix + base[at:]
 }
 
-func LikePattern(base string) string {
+func RandomSuffix(length int) string {
+	const letters = "abcdefghijklmnopqrstuvwxyz"
+	result := make([]byte, length)
+	for i := range result {
+		result[i] = letters[rand.IntN(len(letters))]
+	}
+	return string(result)
+}
+
+func LikePatterns(base string) []string {
 	base = strings.TrimSpace(base)
 	at := strings.LastIndex(base, "@")
 	if at <= 0 {
-		return ""
+		return nil
 	}
-	return escapeLike(base[:at]) + "-%" + escapeLike(base[at:])
+	local := escapeLike(base[:at])
+	domain := escapeLike(base[at:])
+	return []string{local + "+%" + domain, local + "-%" + domain}
 }
 
 func escapeLike(s string) string {

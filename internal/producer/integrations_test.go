@@ -1,0 +1,371 @@
+package producer
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"chatgpt-register/internal/codexoauth"
+	"chatgpt-register/internal/mailfetch"
+	"chatgpt-register/internal/models"
+	"chatgpt-register/internal/smsactivate"
+
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+)
+
+const (
+	integrationEmail = "user@example.test"
+	integrationAT    = "synthetic-access-token"
+	integrationRT    = "synthetic-refresh-token"
+	integrationIDT   = "synthetic-id-token"
+)
+
+type fakeMailClient struct {
+	list func(context.Context, mailfetch.Account, int) ([]mailfetch.Message, error)
+	get  func(context.Context, mailfetch.Account, string) (mailfetch.Message, error)
+}
+
+func (f fakeMailClient) ListMessages(ctx context.Context, account mailfetch.Account, limit int) ([]mailfetch.Message, error) {
+	if f.list == nil {
+		return []mailfetch.Message{}, nil
+	}
+	return f.list(ctx, account, limit)
+}
+
+func (f fakeMailClient) GetMessage(ctx context.Context, account mailfetch.Account, id string) (mailfetch.Message, error) {
+	if f.get == nil {
+		return mailfetch.Message{}, fmt.Errorf("message not found")
+	}
+	return f.get(ctx, account, id)
+}
+
+func integrationTestProducer(t *testing.T, serverURL string) (*Producer, models.Registration) {
+	t.Helper()
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Registration{}, &models.Setting{}); err != nil {
+		t.Fatal(err)
+	}
+	settings := map[string]string{
+		"sub2api_url": serverURL, "sub2api_api_key": "admin-key", "sub2api_group_ids": "12,13",
+		"sub2api_concurrency": "10", "sub2api_priority": "1", "sub2api_timeout": "30",
+	}
+	for key, value := range settings {
+		if err := database.Create(&models.Setting{Key: key, Value: value}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	auth, err := json.Marshal(map[string]any{
+		"auth_mode": "oauth", "email": integrationEmail,
+		"access_token": integrationAT, "refresh_token": integrationRT, "id_token": integrationIDT,
+		"expires_in": 3600, "account_id": "account-id", "chatgpt_user_id": "user-id", "plan_type": "free",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration := models.Registration{
+		Email: integrationEmail, Status: "registered", CodexStatus: "authorized",
+		Sub2APIStatus: "not_imported", AuthData: string(auth), AccountID: "account-id", UserID: "user-id", PlanType: "free",
+	}
+	if err := database.Create(&registration).Error; err != nil {
+		t.Fatal(err)
+	}
+	return &Producer{db: database}, registration
+}
+
+func TestOAuthSourceFromRegistration(t *testing.T) {
+	registration := models.Registration{
+		Email: integrationEmail, AccountID: "fallback-account", UserID: "fallback-user", PlanType: "free",
+		AuthData: `{"credentials":{"access_token":"` + integrationAT + `","refresh_token":"` + integrationRT + `","id_token":"` + integrationIDT + `","expires_in":"120"}}`,
+	}
+	source, err := oauthSourceFromRegistration(registration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.Email != integrationEmail || source.AccessToken != integrationAT || source.RefreshToken != integrationRT || source.ExpiresIn != 120 {
+		t.Fatalf("source=%+v", source)
+	}
+	if source.ChatGPTAccountID != "fallback-account" || source.ChatGPTUserID != "fallback-user" || source.PlanType != "free" {
+		t.Fatalf("fallbacks=%+v", source)
+	}
+}
+
+func TestImportSub2APISuccessUpdatesIndependentState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") != "admin-key" {
+			t.Errorf("x-api-key=%q", r.Header.Get("x-api-key"))
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/admin/accounts":
+			if r.URL.Query().Get("page") == "1" {
+				fmt.Fprintf(w, `{"data":{"items":[{"id":91,"name":"%s","platform":"openai","type":"oauth","credentials":{"email":"%s"}}]}}`, integrationEmail, integrationEmail)
+			} else {
+				fmt.Fprint(w, `{"data":{"items":[]}}`)
+			}
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/admin/accounts/91":
+			fmt.Fprint(w, `{"data":{}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/admin/accounts/91":
+			fmt.Fprintf(w, `{"data":{"id":91,"name":"%s","platform":"openai","type":"oauth","status":"active","group_ids":[12,13],"credentials":{"email":"%s"}}}`, integrationEmail, integrationEmail)
+		default:
+			http.Error(w, "unexpected", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	producer, registration := integrationTestProducer(t, server.URL)
+	result, err := producer.ImportSub2API(context.Background(), registration.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "updated" || result.AccountID != 91 {
+		t.Fatalf("result=%+v", result)
+	}
+	if err := producer.db.First(&registration, registration.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if registration.Status != "registered" || registration.CodexStatus != "authorized" || registration.Sub2APIStatus != "imported" || registration.Sub2APIAccountID == nil || *registration.Sub2APIAccountID != 91 {
+		t.Fatalf("registration=%+v", registration)
+	}
+}
+
+func codexIntegrationTestProducer(t *testing.T) (*Producer, models.Registration) {
+	t.Helper()
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Registration{}, &models.SMSActivation{}, &models.Mailbox{}, &models.Setting{}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox := models.Mailbox{Email: integrationEmail, Provider: "outlook", ClientID: "client", RefreshToken: "refresh", Status: "verified"}
+	if err := database.Create(&mailbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	registration := models.Registration{
+		Email: integrationEmail, MailboxID: mailbox.ID, Password: "account-password", Proxy: "http://proxy-user:proxy-pass@proxy.example.test:8080",
+		Status: "registered", CodexStatus: "pending", Sub2APIStatus: "not_imported",
+		AuthData: `{"auth_mode":"access_token","access_token":"old-token","custom":"keep-me"}`,
+	}
+	if err := database.Create(&registration).Error; err != nil {
+		t.Fatal(err)
+	}
+	return &Producer{db: database, mail: fakeMailClient{}}, registration
+}
+
+func TestAuthorizeCodexMergesTokensWithoutBuyingPhone(t *testing.T) {
+	producer, registration := codexIntegrationTestProducer(t)
+	phoneCalls := 0
+	producer.acquirePhone = func(context.Context, uint) (*codexoauth.PhoneSession, error) {
+		phoneCalls++
+		return nil, fmt.Errorf("unexpected phone purchase")
+	}
+	producer.authorizeCodex = func(_ context.Context, input codexoauth.Input) (codexoauth.Tokens, error) {
+		if input.Email != registration.Email || input.Password != registration.Password || input.Proxy != registration.Proxy || input.AcquirePhone == nil {
+			t.Fatalf("input=%+v", input)
+		}
+		return codexoauth.Tokens{
+			Email: integrationEmail, AccessToken: integrationAT, RefreshToken: integrationRT, IDToken: integrationIDT,
+			ExpiresIn: 3600, ChatGPTAccountID: "codex-account", ChatGPTUserID: "codex-user", PlanType: "plus",
+		}, nil
+	}
+	tokens, err := producer.AuthorizeCodex(context.Background(), registration.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens.RefreshToken != integrationRT || phoneCalls != 0 {
+		t.Fatalf("tokens=%+v phoneCalls=%d", tokens, phoneCalls)
+	}
+	if err := producer.db.First(&registration, registration.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if registration.Status != "registered" || registration.CodexStatus != "authorized" || registration.CodexAuthorizedAt == nil || registration.AccountID != "codex-account" || registration.UserID != "codex-user" || registration.PlanType != "plus" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	var auth map[string]any
+	if err := json.Unmarshal([]byte(registration.AuthData), &auth); err != nil {
+		t.Fatal(err)
+	}
+	if auth["custom"] != "keep-me" || auth["access_token"] != integrationAT || auth["refresh_token"] != integrationRT || auth["id_token"] != integrationIDT || auth["auth_mode"] != "oauth" {
+		t.Fatalf("auth=%v", auth)
+	}
+	var count int64
+	if err := producer.db.Model(&models.SMSActivation{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("SMS activation count=%d error=%v", count, err)
+	}
+}
+
+func TestAuthorizeCodexEmailOTPOnlyUsesMessagesAfterSnapshot(t *testing.T) {
+	producer, registration := codexIntegrationTestProducer(t)
+	calls := 0
+	producer.mail = fakeMailClient{list: func(context.Context, mailfetch.Account, int) ([]mailfetch.Message, error) {
+		calls++
+		oldMessage := mailfetch.Message{ID: "old", From: "noreply@openai.com", Subject: "Old code 111111", ReceivedAt: time.Now().Add(time.Minute)}
+		if calls == 1 {
+			return []mailfetch.Message{oldMessage}, nil
+		}
+		newMessage := mailfetch.Message{ID: "new", From: "noreply@openai.com", Subject: "New code 222222", ReceivedAt: time.Now().Add(time.Minute)}
+		return []mailfetch.Message{oldMessage, newMessage}, nil
+	}}
+	producer.authorizeCodex = func(ctx context.Context, input codexoauth.Input) (codexoauth.Tokens, error) {
+		code, err := input.FetchEmailCode(ctx)
+		if err != nil {
+			return codexoauth.Tokens{}, err
+		}
+		if code != "222222" {
+			return codexoauth.Tokens{}, fmt.Errorf("unexpected code %s", code)
+		}
+		return codexoauth.Tokens{
+			Email: integrationEmail, AccessToken: integrationAT, RefreshToken: integrationRT, IDToken: integrationIDT,
+			ExpiresIn: 3600,
+		}, nil
+	}
+	if _, err := producer.AuthorizeCodex(context.Background(), registration.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAuthorizeCodexUnlocksAfterPanic(t *testing.T) {
+	producer, registration := codexIntegrationTestProducer(t)
+	producer.authorizeCodex = func(context.Context, codexoauth.Input) (codexoauth.Tokens, error) {
+		panic("synthetic authorizer panic")
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("AuthorizeCodex did not panic")
+			}
+		}()
+		_, _ = producer.AuthorizeCodex(context.Background(), registration.ID)
+	}()
+	producer.authorizeCodex = func(context.Context, codexoauth.Input) (codexoauth.Tokens, error) {
+		return codexoauth.Tokens{
+			Email: integrationEmail, AccessToken: integrationAT, RefreshToken: integrationRT, IDToken: integrationIDT, ExpiresIn: 3600,
+		}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := producer.AuthorizeCodex(ctx, registration.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAuthorizeCodexFailureIsRedactedAndIndependent(t *testing.T) {
+	producer, registration := codexIntegrationTestProducer(t)
+	producer.authorizeCodex = func(context.Context, codexoauth.Input) (codexoauth.Tokens, error) {
+		return codexoauth.Tokens{}, fmt.Errorf("failed %s %s %s", registration.Email, registration.Password, registration.Proxy)
+	}
+	_, err := producer.AuthorizeCodex(context.Background(), registration.ID)
+	if err == nil {
+		t.Fatal("AuthorizeCodex returned nil error")
+	}
+	for _, secret := range []string{registration.Email, registration.Password, registration.Proxy} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("returned error leaked %q", secret)
+		}
+	}
+	if err := producer.db.First(&registration, registration.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if registration.Status != "registered" || registration.CodexStatus != "failed" || registration.Sub2APIStatus != "not_imported" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	for _, secret := range []string{integrationEmail, "account-password", registration.Proxy} {
+		if strings.Contains(registration.CodexError+registration.Log, secret) {
+			t.Fatalf("database leaked %q", secret)
+		}
+	}
+}
+
+func TestAcquireSMSPhonePersistsLifecycle(t *testing.T) {
+	producer, registration := codexIntegrationTestProducer(t)
+	for key, value := range map[string]string{
+		"sms_platform": "hero-sms", "sms_api_key": "key", "sms_country": "187", "sms_max_price": "0.5", "sms_timeout": "30",
+	} {
+		if err := producer.db.Create(&models.Setting{Key: key, Value: value}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var statuses []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getNumber":
+			fmt.Fprint(w, "ACCESS_NUMBER:activation-1:12025550123")
+		case "setStatus":
+			statuses = append(statuses, r.URL.Query().Get("status"))
+			fmt.Fprint(w, "ACCESS_READY")
+		case "getStatus":
+			fmt.Fprint(w, "STATUS_OK:654321")
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	producer.newSMSClient = func(config smsactivate.Config) (*smsactivate.Client, error) {
+		return smsactivate.New(config, smsactivate.WithEndpoint(server.URL), smsactivate.WithHTTPClient(server.Client()))
+	}
+	session, err := producer.acquireSMSPhone(context.Background(), registration.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Number != "+12025550123" {
+		t.Fatalf("number=%q", session.Number)
+	}
+	code, err := session.WaitCode(context.Background())
+	if err != nil || code != "654321" {
+		t.Fatalf("WaitCode=%q error=%v", code, err)
+	}
+	if err := session.Finish(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Finish(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(statuses, ",") != "1,6" {
+		t.Fatalf("statuses=%v", statuses)
+	}
+	var activation models.SMSActivation
+	if err := producer.db.First(&activation).Error; err != nil {
+		t.Fatal(err)
+	}
+	if activation.Status != "completed" || activation.ClosedAt == nil || activation.PhoneNumber != "+12025550123" || activation.ActivationID != "activation-1" {
+		t.Fatalf("activation=%+v", activation)
+	}
+}
+
+func TestImportSub2APIFailureRedactsAndKeepsRegistration(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprintf(w, `{"error":"failed for %s with %s %s %s"}`, integrationEmail, integrationAT, integrationRT, integrationIDT)
+	}))
+	defer server.Close()
+
+	producer, registration := integrationTestProducer(t, server.URL)
+	_, err := producer.ImportSub2API(context.Background(), registration.ID)
+	if err == nil {
+		t.Fatal("ImportSub2API returned nil error")
+	}
+	for _, secret := range []string{integrationEmail, integrationAT, integrationRT, integrationIDT} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("returned error leaked %q: %v", secret, err)
+		}
+	}
+	if err := producer.db.First(&registration, registration.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if registration.Status != "registered" || registration.CodexStatus != "authorized" || registration.Sub2APIStatus != "failed" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	for _, secret := range []string{integrationEmail, integrationAT, integrationRT, integrationIDT} {
+		if strings.Contains(registration.Sub2APIError+registration.Log, secret) {
+			t.Fatalf("database leaked %q", secret)
+		}
+	}
+}
