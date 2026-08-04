@@ -6,18 +6,20 @@ import "time"
 //
 // Status 流转: unverified(待验证) / verifying(验证中) / verify_failed(验证失败) / verified(已验证)
 type Mailbox struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	Email         string    `gorm:"size:255;not null;uniqueIndex" json:"email"`
-	Password      string    `gorm:"size:255" json:"password"`
-	Provider      string    `gorm:"size:64" json:"provider"` // gmail / outlook / 临时邮箱...
-	ClientID      string    `gorm:"size:255" json:"client_id"`
-	RefreshToken  string    `gorm:"type:text" json:"refresh_token"`
-	Status        string    `gorm:"size:32;default:unverified" json:"status"`
-	Note          string    `gorm:"type:text" json:"note"`
-	RegisterCount int       `gorm:"-" json:"register_count"`
-	RegisterLimit int       `gorm:"-" json:"register_limit"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID                uint      `gorm:"primaryKey" json:"id"`
+	Email             string    `gorm:"size:255;not null;uniqueIndex" json:"email"`
+	Password          string    `gorm:"size:255" json:"password"`
+	Provider          string    `gorm:"size:64" json:"provider"` // gmail / outlook / 临时邮箱...
+	ClientID          string    `gorm:"size:255" json:"client_id"`
+	RefreshToken      string    `gorm:"type:text" json:"refresh_token"`
+	CodeURL           string    `gorm:"type:text" json:"-"`
+	Status            string    `gorm:"size:32;default:unverified" json:"status"`
+	Note              string    `gorm:"type:text" json:"note"`
+	CodeURLConfigured bool      `gorm:"-" json:"code_url_configured"`
+	RegisterCount     int       `gorm:"-" json:"register_count"`
+	RegisterLimit     int       `gorm:"-" json:"register_limit"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // Setting 系统设置 (key-value)

@@ -4,9 +4,12 @@ package mailfetch
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -23,16 +26,22 @@ const (
 )
 
 var (
-	ErrMissingCreds = errors.New("client_id / refresh_token 必填")
-	ErrAuthFailed   = errors.New("邮箱鉴权失败")
-	searchFolders   = []string{"Inbox", "JunkEmail"}
+	ErrMissingCreds   = errors.New("client_id / refresh_token 必填")
+	ErrInvalidCodeURL = errors.New("取码 API 地址必须是 http 或 https")
+	ErrAuthFailed     = errors.New("邮箱鉴权失败")
+	ErrCodeAPIFailed  = errors.New("取码 API 请求失败")
+	ErrCodeNotFound   = errors.New("取码 API 暂无验证码")
+	searchFolders     = []string{"Inbox", "JunkEmail"}
+	apiCodeRe         = regexp.MustCompile(`\b(\d{6})\b`)
 )
 
 // Account 一条邮箱凭据。
 type Account struct {
 	Email        string
+	Provider     string
 	ClientID     string
 	RefreshToken string
+	CodeURL      string
 }
 
 // Message 一封邮件。列表接口只返回头部（ID/发件人/主题/时间），正文按需单独拉取。
@@ -58,16 +67,45 @@ type Client struct {
 	tokens map[string]cachedToken
 }
 
-func New() *Client {
-	return &Client{
+type Option func(*Client)
+
+func WithHTTPClient(client *http.Client) Option {
+	return func(target *Client) {
+		if client != nil {
+			target.http = client
+		}
+	}
+}
+
+func New(options ...Option) *Client {
+	client := &Client{
 		http:   &http.Client{Timeout: 15 * time.Second},
 		tokens: map[string]cachedToken{},
 	}
+	for _, option := range options {
+		option(client)
+	}
+	return client
+}
+
+func ValidateCodeURL(rawURL string) error {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return ErrInvalidCodeURL
+	}
+	return nil
 }
 
 // Verify 校验一条邮箱凭据是否可用：尝试用 refresh_token 换取 access_token。
 // 批量并发验证时微软 token 端点会偶发限流/瞬时错误，这里带指数退避重试，避免误判为失败。
 func (c *Client) Verify(ctx context.Context, acc Account) error {
+	if strings.TrimSpace(acc.CodeURL) != "" {
+		_, err := c.fetchCodeAPI(ctx, acc)
+		if errors.Is(err, ErrCodeNotFound) {
+			return nil
+		}
+		return err
+	}
 	if acc.ClientID == "" || acc.RefreshToken == "" {
 		return ErrMissingCreds
 	}
@@ -91,6 +129,16 @@ func (c *Client) Verify(ctx context.Context, acc Account) error {
 // ListMessages 拉 Inbox + JunkEmail 最新邮件的头部（不含正文），两个文件夹并发拉取，按时间倒序合并返回。
 // 正文由 GetMessage 按需单独拉取，避免每次列表都传输大量 HTML 拖慢速度。
 func (c *Client) ListMessages(ctx context.Context, acc Account, limit int) ([]Message, error) {
+	if strings.TrimSpace(acc.CodeURL) != "" {
+		message, err := c.fetchCodeAPI(ctx, acc)
+		if errors.Is(err, ErrCodeNotFound) {
+			return []Message{}, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return []Message{message}, nil
+	}
 	if limit < 1 {
 		limit = 20
 	}
@@ -146,6 +194,16 @@ func (c *Client) ListMessages(ctx context.Context, acc Account, limit int) ([]Me
 
 // GetMessage 按消息 ID 拉取单封邮件的完整正文（HTML + 纯文本）。
 func (c *Client) GetMessage(ctx context.Context, acc Account, msgID string) (Message, error) {
+	if strings.TrimSpace(acc.CodeURL) != "" {
+		message, err := c.fetchCodeAPI(ctx, acc)
+		if err != nil {
+			return Message{}, err
+		}
+		if strings.TrimSpace(msgID) != "" && msgID != message.ID {
+			return Message{}, fmt.Errorf("取码消息已更新")
+		}
+		return message, nil
+	}
 	tok, err := c.accessToken(ctx, acc)
 	if err != nil {
 		return Message{}, err
@@ -194,6 +252,113 @@ func (c *Client) GetMessage(ctx context.Context, acc Account, msgID string) (Mes
 		HTML:       html,
 		Text:       text,
 	}, nil
+}
+
+func (c *Client) fetchCodeAPI(ctx context.Context, acc Account) (Message, error) {
+	rawURL := strings.TrimSpace(acc.CodeURL)
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return Message{}, ErrInvalidCodeURL
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return Message{}, ErrInvalidCodeURL
+	}
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("User-Agent", "chatgpt-register/1.0")
+	apiClient := *c.http
+	apiClient.CheckRedirect = func(redirect *http.Request, via []*http.Request) error {
+		if len(via) >= 5 || (redirect.URL.Scheme != "http" && redirect.URL.Scheme != "https") {
+			return ErrCodeAPIFailed
+		}
+		redirect.Header.Del("Referer")
+		return nil
+	}
+	resp, err := apiClient.Do(req)
+	if err != nil {
+		return Message{}, ErrCodeAPIFailed
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotFound {
+		return Message{}, ErrCodeNotFound
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return Message{}, fmt.Errorf("%w: HTTP %d", ErrCodeAPIFailed, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return Message{}, ErrCodeAPIFailed
+	}
+	code := extractAPICode(body)
+	if code == "" {
+		return Message{}, ErrCodeNotFound
+	}
+	digest := sha256.Sum256([]byte(code))
+	return Message{
+		ID:         "api-code-" + hex.EncodeToString(digest[:8]),
+		From:       parsed.Hostname(),
+		FromName:   "验证码 API",
+		Subject:    "OpenAI verification code " + code,
+		ReceivedAt: time.Now(),
+		Text:       code,
+	}, nil
+}
+
+func extractAPICode(body []byte) string {
+	var payload any
+	if json.Unmarshal(body, &payload) == nil {
+		if code := findAPICode(payload, ""); code != "" {
+			return code
+		}
+	}
+	match := apiCodeRe.FindSubmatch(body)
+	if len(match) < 2 {
+		return ""
+	}
+	return string(match[1])
+}
+
+func findAPICode(value any, key string) string {
+	switch current := value.(type) {
+	case map[string]any:
+		for _, candidate := range []string{"code", "otp", "verification_code", "verificationCode", "pin"} {
+			if nested, ok := current[candidate]; ok {
+				if code := findAPICode(nested, candidate); code != "" {
+					return code
+				}
+			}
+		}
+		for nestedKey, nested := range current {
+			if code := findAPICode(nested, nestedKey); code != "" {
+				return code
+			}
+		}
+	case []any:
+		for _, nested := range current {
+			if code := findAPICode(nested, key); code != "" {
+				return code
+			}
+		}
+	case string:
+		if key == "" || isCodeKey(key) {
+			if match := apiCodeRe.FindStringSubmatch(current); len(match) > 1 {
+				return match[1]
+			}
+		}
+	case float64:
+		if isCodeKey(key) {
+			code := fmt.Sprintf("%.0f", current)
+			if apiCodeRe.MatchString(code) && len(code) == 6 {
+				return code
+			}
+		}
+	}
+	return ""
+}
+
+func isCodeKey(key string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "_", ""))
+	return normalized == "code" || normalized == "otp" || normalized == "verificationcode" || normalized == "pin"
 }
 
 type graphMessage struct {

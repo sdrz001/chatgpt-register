@@ -241,8 +241,11 @@ func TestRandomCandidatesContinueOnlyForExpectedCodes(t *testing.T) {
 		config.Country = 0
 		config.RandomCountries = []int{16, 187}
 		var calls int
-		client, server := newTestClient(t, config, func(w http.ResponseWriter, _ *http.Request) {
+		client, server := newTestClient(t, config, func(w http.ResponseWriter, r *http.Request) {
 			calls++
+			if r.URL.Query().Get("service") != ServiceOpenAI || r.URL.Query().Get("maxPrice") != "0.5" {
+				t.Errorf("getNumber query = %v", r.URL.Query())
+			}
 			if calls == 1 {
 				fmt.Fprint(w, "WRONG_MAX_PRICE")
 				return

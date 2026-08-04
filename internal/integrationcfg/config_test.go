@@ -42,19 +42,19 @@ func TestSMSConfigDefaultsAndModes(t *testing.T) {
 	if config.Client.Platform != smsactivate.PlatformHeroSMS || config.Client.Country != 0 || len(config.Client.RandomCountries) != 4 {
 		t.Fatalf("default SMS config=%+v", config)
 	}
-	if config.Client.MaxPrice != 0.5 || config.PollTimeout != 180*time.Second || config.PollInterval != 5*time.Second {
+	if config.Client.MaxPrice != 0.5 || config.PollTimeout != 180*time.Second || config.PollInterval != 5*time.Second || config.MaxPhoneAttempts != 3 {
 		t.Fatalf("default SMS timing=%+v", config)
 	}
 
 	values = Values{
 		"sms_platform": "smsbower", "sms_api_key": "key", "sms_country": "16",
-		"sms_max_price": "1.25", "sms_timeout": "90",
+		"sms_max_price": "1.25", "sms_timeout": "90", "sms_phone_attempts": "5",
 	}
 	config, err = values.SMS()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Client.Platform != smsactivate.PlatformSMSBower || config.Client.Country != 16 || len(config.Client.RandomCountries) != 0 || config.Client.MaxPrice != 1.25 {
+	if config.Client.Platform != smsactivate.PlatformSMSBower || config.Client.Country != 16 || len(config.Client.RandomCountries) != 0 || config.Client.MaxPrice != 1.25 || config.MaxPhoneAttempts != 5 {
 		t.Fatalf("fixed SMS config=%+v", config)
 	}
 }
@@ -66,6 +66,7 @@ func TestSMSConfigRejectsInvalidValues(t *testing.T) {
 		"candidates": {"sms_api_key": "key", "sms_country": "random", "sms_random_countries": "x"},
 		"price":      {"sms_api_key": "key", "sms_max_price": "6"},
 		"timeout":    {"sms_api_key": "key", "sms_timeout": "10"},
+		"attempts":   {"sms_api_key": "key", "sms_phone_attempts": "11"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := values.SMS(); err == nil {

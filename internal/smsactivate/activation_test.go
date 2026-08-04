@@ -129,6 +129,27 @@ func TestActivationCloseRetriesOriginalStatusAfterError(t *testing.T) {
 	}
 }
 
+func TestActivationCloseRetriesAfterEarlyCancelWindow(t *testing.T) {
+	calls := 0
+	client, err := New(validConfig(), WithHTTPClient(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		body := "EARLY_CANCEL_DENIED"
+		if calls == 2 {
+			body = "ACCESS_CANCEL"
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activation := newActivation(client, Number{ActivationID: "id", Phone: "123", Country: 16})
+	activation.createdAt = time.Now().Add(-cancelRetryAge)
+	result, err := activation.Close(context.Background(), false)
+	if err != nil || result != "ACCESS_CANCEL" || calls != 2 {
+		t.Fatalf("Close(false)=%q/%v calls=%d", result, err, calls)
+	}
+}
+
 func TestActivationConcurrentCloseSharesRequest(t *testing.T) {
 	var calls int
 	started := make(chan struct{})
@@ -191,9 +212,11 @@ func TestActivationPollContextTimeoutAndThenRetry(t *testing.T) {
 }
 
 func TestActivationPollCancelledAndValidation(t *testing.T) {
+	var statuses []string
 	client, server := newTestClient(t, validConfig(), func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("action") {
 		case "setStatus":
+			statuses = append(statuses, r.URL.Query().Get("status"))
 			fmt.Fprint(w, "ACCESS_READY")
 		case "getStatus":
 			fmt.Fprint(w, "STATUS_CANCEL")
@@ -206,5 +229,9 @@ func TestActivationPollCancelledAndValidation(t *testing.T) {
 	}
 	if _, err := activation.PollCode(context.Background(), time.Millisecond); !IsCode(err, "STATUS_CANCEL") {
 		t.Fatalf("cancel status error = %v", err)
+	}
+	result, err := activation.Close(context.Background(), false)
+	if err != nil || result != "STATUS_CANCEL" || strings.Join(statuses, ",") != "1" {
+		t.Fatalf("Close(false)=%q/%v statuses=%v", result, err, statuses)
 	}
 }

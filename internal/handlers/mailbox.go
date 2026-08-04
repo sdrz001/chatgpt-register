@@ -19,6 +19,7 @@ type mailboxInput struct {
 	Provider     string `json:"provider"`
 	ClientID     string `json:"client_id"`
 	RefreshToken string `json:"refresh_token"`
+	CodeURL      string `json:"code_url"`
 	Status       string `json:"status"`
 	Note         string `json:"note"`
 }
@@ -32,6 +33,13 @@ var mailboxStatuses = map[string]bool{
 
 func validMailboxStatus(s string) bool {
 	return s == "" || mailboxStatuses[s]
+}
+
+func mailboxAccount(mailbox models.Mailbox) mailfetch.Account {
+	return mailfetch.Account{
+		Email: mailbox.Email, Provider: mailbox.Provider, ClientID: mailbox.ClientID,
+		RefreshToken: mailbox.RefreshToken, CodeURL: mailbox.CodeURL,
+	}
 }
 
 func (h *Handler) MailboxList(c *gin.Context) {
@@ -60,6 +68,7 @@ func (h *Handler) MailboxList(c *gin.Context) {
 	}
 	registerLimit := 1 + h.fissionCount()
 	for i := range items {
+		items[i].CodeURLConfigured = strings.TrimSpace(items[i].CodeURL) != ""
 		items[i].RegisterCount = h.mailboxRegisterCount(items[i])
 		items[i].RegisterLimit = registerLimit
 	}
@@ -98,14 +107,33 @@ func (h *Handler) MailboxCreate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status"})
 		return
 	}
-	m := models.Mailbox{Email: in.Email, Password: in.Password, Provider: in.Provider, ClientID: in.ClientID, RefreshToken: in.RefreshToken, Status: in.Status, Note: in.Note}
+	codeURL := strings.TrimSpace(in.CodeURL)
+	if codeURL != "" {
+		if err := mailfetch.ValidateCodeURL(codeURL); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	m := models.Mailbox{
+		Email: strings.TrimSpace(in.Email), Password: in.Password, Provider: strings.TrimSpace(in.Provider),
+		ClientID: strings.TrimSpace(in.ClientID), RefreshToken: strings.TrimSpace(in.RefreshToken), CodeURL: codeURL,
+		Status: in.Status, Note: in.Note,
+	}
+	if codeURL != "" {
+		m.Provider = "api"
+		m.Password, m.ClientID, m.RefreshToken = "", "", ""
+	}
 	if m.Status == "" {
 		m.Status = "unverified"
+		if codeURL != "" {
+			m.Status = "verified"
+		}
 	}
 	if err := h.DB.Create(&m).Error; err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
 	}
+	m.CodeURLConfigured = m.CodeURL != ""
 	c.JSON(http.StatusCreated, m)
 }
 
@@ -114,6 +142,7 @@ type mailboxImportItem struct {
 	Password     string `json:"password"`
 	ClientID     string `json:"client_id"`
 	RefreshToken string `json:"refresh_token"`
+	CodeURL      string `json:"code_url"`
 }
 
 // MailboxImport 批量导入邮箱，重复 email 自动跳过。
@@ -140,12 +169,19 @@ func (h *Handler) MailboxImport(c *gin.Context) {
 			skipped++
 			continue
 		}
+		codeURL := strings.TrimSpace(it.CodeURL)
+		if codeURL != "" && mailfetch.ValidateCodeURL(codeURL) != nil {
+			skipped++
+			continue
+		}
 		m := models.Mailbox{
-			Email:        email,
-			Password:     strings.TrimSpace(it.Password),
-			ClientID:     strings.TrimSpace(it.ClientID),
-			RefreshToken: strings.TrimSpace(it.RefreshToken),
-			Status:       "verifying",
+			Email: email, Password: strings.TrimSpace(it.Password), ClientID: strings.TrimSpace(it.ClientID),
+			RefreshToken: strings.TrimSpace(it.RefreshToken), CodeURL: codeURL, Status: "verifying",
+		}
+		if codeURL != "" {
+			m.Provider = "api"
+			m.Status = "verified"
+			m.Password, m.ClientID, m.RefreshToken = "", "", ""
 		}
 		if err := h.DB.Create(&m).Error; err != nil {
 			skipped++
@@ -163,11 +199,7 @@ func (h *Handler) MailboxVerify(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "邮箱不存在"})
 		return
 	}
-	err := h.Mail.Verify(c.Request.Context(), mailfetch.Account{
-		Email:        m.Email,
-		ClientID:     m.ClientID,
-		RefreshToken: m.RefreshToken,
-	})
+	err := h.Mail.Verify(c.Request.Context(), mailboxAccount(m))
 	if err != nil {
 		m.Status = "verify_failed"
 	} else {
@@ -192,11 +224,20 @@ func (h *Handler) MailboxUpdate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status"})
 		return
 	}
-	m.Email = in.Email
+	m.Email = strings.TrimSpace(in.Email)
 	m.Password = in.Password
-	m.Provider = in.Provider
-	m.ClientID = in.ClientID
-	m.RefreshToken = in.RefreshToken
+	m.Provider = strings.TrimSpace(in.Provider)
+	m.ClientID = strings.TrimSpace(in.ClientID)
+	m.RefreshToken = strings.TrimSpace(in.RefreshToken)
+	if codeURL := strings.TrimSpace(in.CodeURL); codeURL != "" {
+		if err := mailfetch.ValidateCodeURL(codeURL); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		m.CodeURL = codeURL
+		m.Provider = "api"
+		m.Password, m.ClientID, m.RefreshToken = "", "", ""
+	}
 	if in.Status != "" {
 		m.Status = in.Status
 	}
@@ -205,6 +246,7 @@ func (h *Handler) MailboxUpdate(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
 	}
+	m.CodeURLConfigured = m.CodeURL != ""
 	c.JSON(http.StatusOK, m)
 }
 
@@ -224,11 +266,7 @@ func (h *Handler) MailboxMessages(c *gin.Context) {
 		return
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	msgs, err := h.Mail.ListMessages(c.Request.Context(), mailfetch.Account{
-		Email:        m.Email,
-		ClientID:     m.ClientID,
-		RefreshToken: m.RefreshToken,
-	}, limit)
+	msgs, err := h.Mail.ListMessages(c.Request.Context(), mailboxAccount(m), limit)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, mailfetch.ErrMissingCreds) || errors.Is(err, mailfetch.ErrAuthFailed) {
@@ -247,11 +285,7 @@ func (h *Handler) MailboxMessage(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "邮箱不存在"})
 		return
 	}
-	msg, err := h.Mail.GetMessage(c.Request.Context(), mailfetch.Account{
-		Email:        m.Email,
-		ClientID:     m.ClientID,
-		RefreshToken: m.RefreshToken,
-	}, c.Query("mid"))
+	msg, err := h.Mail.GetMessage(c.Request.Context(), mailboxAccount(m), c.Query("mid"))
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, mailfetch.ErrMissingCreds) || errors.Is(err, mailfetch.ErrAuthFailed) {

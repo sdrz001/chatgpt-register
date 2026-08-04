@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"chatgpt-register/internal/integrationcfg"
 	"chatgpt-register/internal/models"
 	"chatgpt-register/internal/smsactivate"
 
@@ -18,11 +19,16 @@ func (h *Handler) SMSPlatformMeta(c *gin.Context) {
 			{"id": "hero-sms", "label": "Hero SMS"},
 			{"id": "smsbower", "label": "SMSBower"},
 		},
-		"service":           smsactivate.ServiceOpenAI,
-		"default_country":   "random",
-		"default_max_price": 0.5,
-		"max_price_limit":   smsactivate.MaxPriceLimit,
-		"countries":         smsactivate.Countries(),
+		"service":                  smsactivate.ServiceOpenAI,
+		"service_label":            "OpenAI",
+		"default_country":          "random",
+		"default_random_countries": integrationcfg.DefaultSMSRandomCountries(),
+		"default_max_price":        0.5,
+		"max_price_limit":          smsactivate.MaxPriceLimit,
+		"minimum_phone_attempts":   1,
+		"default_phone_attempts":   integrationcfg.DefaultSMSPhoneAttempts,
+		"maximum_phone_attempts":   integrationcfg.MaximumSMSPhoneAttempts,
+		"countries":                smsactivate.Countries(),
 	})
 }
 

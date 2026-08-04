@@ -65,6 +65,10 @@ type Progress struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+type smsLeaseToken struct {
+	marker byte
+}
+
 type mailClient interface {
 	ListMessages(context.Context, mailfetch.Account, int) ([]mailfetch.Message, error)
 	GetMessage(context.Context, mailfetch.Account, string) (mailfetch.Message, error)
@@ -83,9 +87,11 @@ type Producer struct {
 	inflight map[string]uint // email -> mailboxID，正在处理中的任务
 	// failed 记录当前仍处于失败态的邮箱（重试成功后会移除）。
 	// 只有最终没能注册成功的邮箱才计入失败数——中途重试失败不算。
-	failed map[string]struct{}
-	pxMu   sync.Mutex
-	pxIdx  int
+	failed   map[string]struct{}
+	pxMu     sync.Mutex
+	pxIdx    int
+	smsMu    sync.Mutex
+	smsLease map[uint]*smsLeaseToken
 
 	authorizeCodex func(context.Context, codexoauth.Input) (codexoauth.Tokens, error)
 	acquirePhone   func(context.Context, uint) (*codexoauth.PhoneSession, error)
@@ -94,7 +100,7 @@ type Producer struct {
 
 func New(db *gorm.DB, mail *mailfetch.Client) *Producer {
 	producer := &Producer{
-		db: db, mail: mail, inflight: map[string]uint{}, failed: map[string]struct{}{},
+		db: db, mail: mail, inflight: map[string]uint{}, failed: map[string]struct{}{}, smsLease: map[uint]*smsLeaseToken{},
 		authorizeCodex: codexoauth.Authorize,
 		newSMSClient:   func(config smsactivate.Config) (*smsactivate.Client, error) { return smsactivate.New(config) },
 	}
@@ -279,6 +285,13 @@ func (p *Producer) nextJob(cfg Config) (models.Mailbox, string, bool, bool) {
 }
 
 // produceOne 完整生产一个账号：注册 ChatGPT → 获取 accessToken → 入库。
+func mailAccount(mailbox models.Mailbox) mailfetch.Account {
+	return mailfetch.Account{
+		Email: mailbox.Email, Provider: mailbox.Provider, ClientID: mailbox.ClientID,
+		RefreshToken: mailbox.RefreshToken, CodeURL: mailbox.CodeURL,
+	}
+}
+
 func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox, email string, isMother bool) error {
 	password := codexreg.GenPassword(16)
 	accountProxy := p.nextProxy(cfg)
@@ -299,11 +312,15 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 		if !strings.HasSuffix(existing.Log, "\n") {
 			logBuf.WriteString("\n")
 		}
-		logBuf.WriteString(time.Now().Format("2006-01-02 15:04:05") + " --- 新一轮注册尝试 ---\n")
+		logBuf.WriteString(time.Now().Format("2006-01-02 15:04:05"))
+		logBuf.WriteString(" --- 新一轮注册尝试 ---\n")
 	}
 	appendLog := func(line string) {
 		logMu.Lock()
-		logBuf.WriteString(time.Now().Format("2006-01-02 15:04:05") + " " + line + "\n")
+		logBuf.WriteString(time.Now().Format("2006-01-02 15:04:05"))
+		logBuf.WriteString(" ")
+		logBuf.WriteString(line)
+		logBuf.WriteString("\n")
 		snapshot := logBuf.String()
 		logMu.Unlock()
 		// 实时写库，注册中的账号也能在弹窗里看到执行日志
@@ -311,6 +328,16 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 	}
 
 	since := time.Now().Add(-30 * time.Second)
+	ignoredMessageIDs := map[string]struct{}{}
+	account := mailAccount(mb)
+	if existingMessages, snapshotErr := p.mail.ListMessages(ctx, account, 30); snapshotErr != nil {
+		appendLog("⚠ 读取注册前邮件快照失败，将仅按邮件时间过滤旧验证码: " + snapshotErr.Error())
+		since = time.Now()
+	} else {
+		for _, message := range existingMessages {
+			ignoredMessageIDs[message.ID] = struct{}{}
+		}
+	}
 	in := codexreg.Input{
 		Email:    email,
 		Password: password,
@@ -322,7 +349,7 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 			p.logf("%s", "  "+mask(email)+" "+msg)
 		},
 		FetchCode: func(ctx context.Context) (string, error) {
-			return p.fetchCode(ctx, mb, since)
+			return p.fetchCodeAfter(ctx, mb, since, ignoredMessageIDs)
 		},
 		SaveShot: func(png []byte) {
 			p.db.Model(&models.Registration{}).Where("email = ?", email).Update("shot", png)
@@ -372,7 +399,10 @@ func (p *Producer) fetchCode(ctx context.Context, mb models.Mailbox, since time.
 }
 
 func (p *Producer) fetchCodeAfter(ctx context.Context, mb models.Mailbox, since time.Time, ignoredIDs map[string]struct{}) (string, error) {
-	acc := mailfetch.Account{Email: mb.Email, ClientID: mb.ClientID, RefreshToken: mb.RefreshToken}
+	if ignoredIDs == nil {
+		ignoredIDs = map[string]struct{}{}
+	}
+	acc := mailAccount(mb)
 	deadline := time.Now().Add(codePollTimeout)
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
@@ -385,6 +415,7 @@ func (p *Producer) fetchCodeAfter(ctx context.Context, mb models.Mailbox, since 
 					continue
 				}
 				if code := codeRe.FindStringSubmatch(m.Subject); code != nil {
+					ignoredIDs[m.ID] = struct{}{}
 					return code[1], nil
 				}
 				full, gerr := p.mail.GetMessage(ctx, acc, m.ID)
@@ -392,6 +423,7 @@ func (p *Producer) fetchCodeAfter(ctx context.Context, mb models.Mailbox, since 
 					continue
 				}
 				if code := codeRe.FindStringSubmatch(full.Subject + " " + full.Text); code != nil {
+					ignoredIDs[m.ID] = struct{}{}
 					return code[1], nil
 				}
 			}

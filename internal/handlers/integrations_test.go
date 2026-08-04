@@ -48,13 +48,18 @@ func TestSMSPlatformMetaContainsPublicCatalogOnly(t *testing.T) {
 		t.Fatalf("meta leaked secret field: %s", response.Body.String())
 	}
 	var body struct {
-		Service   string           `json:"service"`
-		Countries []map[string]any `json:"countries"`
+		Service                string           `json:"service"`
+		ServiceLabel           string           `json:"service_label"`
+		MinimumPhoneAttempts   int              `json:"minimum_phone_attempts"`
+		DefaultRandomCountries string           `json:"default_random_countries"`
+		DefaultPhoneAttempts   int              `json:"default_phone_attempts"`
+		MaximumPhoneAttempts   int              `json:"maximum_phone_attempts"`
+		Countries              []map[string]any `json:"countries"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Service != "dr" || len(body.Countries) < 190 {
+	if body.Service != "dr" || body.ServiceLabel != "OpenAI" || body.DefaultRandomCountries != "187,16,36,43" || body.MinimumPhoneAttempts != 1 || body.DefaultPhoneAttempts != 3 || body.MaximumPhoneAttempts != 10 || len(body.Countries) < 190 {
 		t.Fatalf("meta=%+v", body)
 	}
 }

@@ -14,7 +14,11 @@ import (
 	"github.com/go-rod/stealth"
 )
 
-const browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+const (
+	browserUserAgent        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+	phoneInputSelector      = "input[type='tel'],input[name='phone'],input[name='phone_number'],input[autocomplete='tel'],input[autocomplete='tel-national']"
+	phoneReplacementTimeout = 2*time.Minute + 15*time.Second
+)
 
 func driveBrowser(ctx context.Context, in Input, flow Flow, broker *CallbackBroker) (err error) {
 	launcherInstance := launcher.New().Context(ctx).
@@ -81,17 +85,25 @@ func driveBrowser(ctx context.Context, in Input, flow Flow, broker *CallbackBrok
 		return fmt.Errorf("打开 Codex OAuth 授权页失败: %w", err)
 	}
 
-	var phone *PhoneSession
+	phones := newPhoneSessionManager(in.MaxPhoneAttempts, in.AcquirePhone)
 	var emailSubmitted, passwordSubmitted, emailOTPSubmitted, phoneSubmitted, phoneOTPSubmitted bool
+	var phoneSubmittedAt, phoneOTPSubmittedAt, phoneOTPRejectedAt, phoneResendStartedAt time.Time
+	phoneOTPAttempts := 0
 	phoneFinished := false
 	personalChoicePage := ""
 	defer func() {
+		phone := phones.current
 		if phone == nil || phoneFinished || phone.Finish == nil {
 			return
 		}
-		closeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		success := phoneOTPSubmitted && errors.Is(context.Cause(ctx), errOAuthCallback)
+		timeout := 15 * time.Second
+		if !success {
+			timeout = phoneReplacementTimeout
+		}
+		closeCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		_ = phone.Finish(closeCtx, phoneOTPSubmitted && errors.Is(context.Cause(ctx), errOAuthCallback))
+		_ = phone.Finish(closeCtx, success)
 	}()
 
 	deadline := time.NewTimer(6 * time.Minute)
@@ -123,15 +135,35 @@ func driveBrowser(ctx context.Context, in Input, flow Flow, broker *CallbackBrok
 		body := visibleBodyText(page)
 		emailInput := visibleElement(page, "input[type='email'],input[name='username'],input[name='email'],#email")
 		passwordInput := visibleElement(page, "input[type='password'],input[name='password']")
-		phoneInput := visibleElement(page, "input[type='tel'],input[name='phone'],input[name='phone_number'],input[autocomplete='tel'],input[autocomplete='tel-national']")
+		phoneInput := visibleElement(page, phoneInputSelector)
 		otpInput := visibleElement(page, "input[name='code'],input[autocomplete='one-time-code'],input[inputmode='numeric']")
 		actionButton := visibleAction(page)
 		state := classifyPage(pageSignals{
 			URL: currentURL, Body: body, HasEmail: emailInput != nil, HasPassword: passwordInput != nil,
-			HasPhone: phoneInput != nil, HasOTP: otpInput != nil, HasAction: actionButton != nil, PhoneAllocated: phone != nil,
+			HasPhone: phoneInput != nil, HasOTP: otpInput != nil, HasAction: actionButton != nil, PhoneAllocated: phones.current != nil,
 		})
+		if phoneSubmitted && !phoneOTPSubmitted && time.Since(phoneSubmittedAt) >= 2*time.Second && phoneNumberRejected(body) {
+			closeCtx, cancel := context.WithTimeout(ctx, phoneReplacementTimeout)
+			rejectErr := phones.reject(closeCtx)
+			cancel()
+			if rejectErr != nil {
+				return rejectErr
+			}
+			in.logf("Codex OAuth 手机号被拒，自动更换（已尝试 %d/%d）", phones.attempts, phones.maxAttempts)
+			phoneSubmitted = false
+			phoneOTPAttempts = 0
+			phoneOTPRejectedAt = time.Time{}
+			phoneResendStartedAt = time.Time{}
+			if phoneInput == nil {
+				if retryErr := returnToPhoneInput(page); retryErr != nil {
+					return retryErr
+				}
+			}
+			continue
+		}
 		if phoneOTPSubmitted && !phoneFinished && (state == stateConsent || state == stateCallback) {
-			if phone.Finish != nil {
+			phone := phones.current
+			if phone != nil && phone.Finish != nil {
 				closeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				finishErr := phone.Finish(closeCtx, true)
 				cancel()
@@ -192,15 +224,9 @@ func driveBrowser(ctx context.Context, in Input, flow Flow, broker *CallbackBrok
 			if phoneSubmitted {
 				continue
 			}
-			if in.AcquirePhone == nil {
-				return fmt.Errorf("Codex OAuth 需要新增手机号，请先配置动态接码")
-			}
-			phone, err = in.AcquirePhone(ctx)
-			if err != nil {
-				return fmt.Errorf("购买 Codex OAuth 接码号码失败: %w", err)
-			}
-			if phone == nil || strings.TrimSpace(phone.Number) == "" || phone.WaitCode == nil {
-				return fmt.Errorf("动态接码返回的号码会话无效")
+			phone, acquireErr := phones.acquire(ctx)
+			if acquireErr != nil {
+				return fmt.Errorf("购买 Codex OAuth 接码号码失败: %w", acquireErr)
 			}
 			if err := replaceInput(phoneInput, phone.Number); err != nil {
 				return fmt.Errorf("填写 Codex OAuth 手机号失败: %w", err)
@@ -209,11 +235,35 @@ func driveBrowser(ctx context.Context, in Input, flow Flow, broker *CallbackBrok
 				return fmt.Errorf("提交 Codex OAuth 手机号失败: %w", err)
 			}
 			phoneSubmitted = true
+			phoneSubmittedAt = time.Now()
 		case statePhoneOTP:
+			phone := phones.current
 			if phoneOTPSubmitted {
-				if containsAny(strings.ToLower(body), "invalid code", "incorrect code", "验证码错误", "验证码无效") {
-					return fmt.Errorf("Codex OAuth 短信验证码校验失败")
+				if time.Since(phoneOTPSubmittedAt) >= 2*time.Second && phoneCodeRejected(body) {
+					if phoneOTPAttempts >= 2 {
+						return fmt.Errorf("Codex OAuth 短信验证码连续 %d 次未通过", phoneOTPAttempts)
+					}
+					if phoneOTPRejectedAt.IsZero() {
+						phoneOTPRejectedAt = time.Now()
+					}
+					resend := visiblePhoneResendAction(page)
+					if resend == nil {
+						if time.Since(phoneOTPRejectedAt) < 90*time.Second {
+							continue
+						}
+						return fmt.Errorf("Codex OAuth 短信验证码未通过，页面没有可用的重新发送入口")
+					}
+					if clickErr := resend.Click(proto.InputMouseButtonLeft, 1); clickErr != nil {
+						return fmt.Errorf("重新发送 Codex OAuth 短信验证码失败: %w", clickErr)
+					}
+					in.logf("Codex OAuth 短信验证码未通过，已请求同一号码的新验证码")
+					phoneOTPSubmitted = false
+					phoneResendStartedAt = time.Now()
+					continue
 				}
+				continue
+			}
+			if !phoneResendStartedAt.IsZero() && time.Since(phoneResendStartedAt) < time.Second {
 				continue
 			}
 			if phone == nil || phone.WaitCode == nil {
@@ -221,7 +271,27 @@ func driveBrowser(ctx context.Context, in Input, flow Flow, broker *CallbackBrok
 			}
 			code, fetchErr := phone.WaitCode(ctx)
 			if fetchErr != nil {
-				return fmt.Errorf("获取 Codex OAuth 短信验证码失败: %w", fetchErr)
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if phone.ReplaceOnError == nil || !phone.ReplaceOnError(fetchErr) {
+					return fmt.Errorf("获取 Codex OAuth 短信验证码失败: %w", fetchErr)
+				}
+				closeCtx, cancel := context.WithTimeout(ctx, phoneReplacementTimeout)
+				rejectErr := phones.reject(closeCtx)
+				cancel()
+				if rejectErr != nil {
+					return rejectErr
+				}
+				in.logf("Codex OAuth 接码订单未收到验证码，自动更换（已尝试 %d/%d）", phones.attempts, phones.maxAttempts)
+				phoneSubmitted = false
+				phoneOTPAttempts = 0
+				phoneOTPRejectedAt = time.Time{}
+				phoneResendStartedAt = time.Time{}
+				if retryErr := returnToPhoneInput(page); retryErr != nil {
+					return retryErr
+				}
+				continue
 			}
 			if err := inputOTP(page, otpInput, code); err != nil {
 				return fmt.Errorf("填写 Codex OAuth 短信验证码失败: %w", err)
@@ -232,6 +302,10 @@ func driveBrowser(ctx context.Context, in Input, flow Flow, broker *CallbackBrok
 				}
 			}
 			phoneOTPSubmitted = true
+			phoneOTPSubmittedAt = time.Now()
+			phoneOTPAttempts++
+			phoneOTPRejectedAt = time.Time{}
+			phoneResendStartedAt = time.Time{}
 		case stateConsent:
 			if personalChoicePage != currentURL && containsAny(strings.ToLower(currentURL+" "+body), "organization", "workspace", "工作区") {
 				if personal := visiblePersonalChoice(page); personal != nil {
@@ -319,6 +393,70 @@ func visiblePersonalChoice(page *rod.Page) *rod.Element {
 	return nil
 }
 
+func returnToPhoneInput(page *rod.Page) error {
+	if retry := visiblePhoneRetryAction(page); retry != nil {
+		if err := retry.Click(proto.InputMouseButtonLeft, 1); err != nil {
+			return fmt.Errorf("返回 Codex OAuth 手机号输入页失败: %w", err)
+		}
+	} else if err := page.NavigateBack(); err != nil {
+		return fmt.Errorf("返回 Codex OAuth 手机号输入页失败: %w", err)
+	}
+	waitPage, cancel := page.WithCancel()
+	defer cancel()
+	if _, err := waitPage.Timeout(15 * time.Second).Element(phoneInputSelector); err != nil {
+		return fmt.Errorf("等待 Codex OAuth 手机号输入页失败: %w", err)
+	}
+	return nil
+}
+
+func visiblePhoneResendAction(page *rod.Page) *rod.Element {
+	buttons, err := page.Elements("button,a,[role='button']")
+	if err != nil {
+		return nil
+	}
+	for _, button := range buttons {
+		visible, visibleErr := button.Visible()
+		if visibleErr != nil || !visible {
+			continue
+		}
+		disabled, disabledErr := button.Disabled()
+		if disabledErr == nil && disabled {
+			continue
+		}
+		text, textErr := button.Text()
+		if textErr != nil {
+			continue
+		}
+		text = strings.ToLower(strings.TrimSpace(text))
+		if containsAny(text, "resend code", "send again", "request another code", "resend sms", "重新发送", "重发验证码", "再次发送") {
+			return button
+		}
+	}
+	return nil
+}
+
+func visiblePhoneRetryAction(page *rod.Page) *rod.Element {
+	buttons, err := page.Elements("button,a,[role='button']")
+	if err != nil {
+		return nil
+	}
+	for _, button := range buttons {
+		visible, visibleErr := button.Visible()
+		if visibleErr != nil || !visible {
+			continue
+		}
+		text, textErr := button.Text()
+		if textErr != nil {
+			continue
+		}
+		text = strings.ToLower(strings.TrimSpace(text))
+		if containsAny(text, "try another", "use another", "different phone", "change phone", "back", "其他号码", "更换号码", "更换手机号", "返回") {
+			return button
+		}
+	}
+	return nil
+}
+
 func visibleAction(page *rod.Page) *rod.Element {
 	buttons, err := page.Elements("button,input[type='submit']")
 	if err != nil {
@@ -372,6 +510,9 @@ func inputOTP(page *rod.Page, element *rod.Element, code string) error {
 		}
 		if len(visible) > 1 && len(visible) >= len(code) {
 			for index, character := range code {
+				if err := visible[index].SelectAllText(); err != nil {
+					return err
+				}
 				if err := visible[index].Input(string(character)); err != nil {
 					return err
 				}

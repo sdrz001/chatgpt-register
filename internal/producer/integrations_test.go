@@ -162,13 +162,20 @@ func codexIntegrationTestProducer(t *testing.T) (*Producer, models.Registration)
 
 func TestAuthorizeCodexMergesTokensWithoutBuyingPhone(t *testing.T) {
 	producer, registration := codexIntegrationTestProducer(t)
+	for key, value := range map[string]string{
+		"sms_api_key": "key", "sms_country": "187", "sms_phone_attempts": "5",
+	} {
+		if err := producer.db.Create(&models.Setting{Key: key, Value: value}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
 	phoneCalls := 0
 	producer.acquirePhone = func(context.Context, uint) (*codexoauth.PhoneSession, error) {
 		phoneCalls++
 		return nil, fmt.Errorf("unexpected phone purchase")
 	}
 	producer.authorizeCodex = func(_ context.Context, input codexoauth.Input) (codexoauth.Tokens, error) {
-		if input.Email != registration.Email || input.Password != registration.Password || input.Proxy != registration.Proxy || input.AcquirePhone == nil {
+		if input.Email != registration.Email || input.Password != registration.Password || input.Proxy != registration.Proxy || input.AcquirePhone == nil || input.MaxPhoneAttempts != 5 {
 			t.Fatalf("input=%+v", input)
 		}
 		return codexoauth.Tokens{
@@ -199,6 +206,34 @@ func TestAuthorizeCodexMergesTokensWithoutBuyingPhone(t *testing.T) {
 	var count int64
 	if err := producer.db.Model(&models.SMSActivation{}).Count(&count).Error; err != nil || count != 0 {
 		t.Fatalf("SMS activation count=%d error=%v", count, err)
+	}
+}
+
+func TestFetchCodeAfterConsumesMessageID(t *testing.T) {
+	calls := 0
+	producer := &Producer{mail: fakeMailClient{list: func(context.Context, mailfetch.Account, int) ([]mailfetch.Message, error) {
+		calls++
+		oldMessage := mailfetch.Message{ID: "old", From: "noreply@openai.com", Subject: "Old code 111111", ReceivedAt: time.Now()}
+		if calls == 1 {
+			return []mailfetch.Message{oldMessage}, nil
+		}
+		return []mailfetch.Message{
+			oldMessage,
+			{ID: "new", From: "noreply@openai.com", Subject: "New code 222222", ReceivedAt: time.Now()},
+		}, nil
+	}}}
+	ignored := map[string]struct{}{}
+	mailbox := models.Mailbox{Email: integrationEmail}
+	first, err := producer.fetchCodeAfter(context.Background(), mailbox, time.Now().Add(-time.Minute), ignored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := producer.fetchCodeAfter(context.Background(), mailbox, time.Now().Add(-time.Minute), ignored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != "111111" || second != "222222" {
+		t.Fatalf("first=%q second=%q ignored=%v", first, second, ignored)
 	}
 }
 
@@ -337,6 +372,266 @@ func TestAcquireSMSPhonePersistsLifecycle(t *testing.T) {
 	}
 	if activation.Status != "completed" || activation.ClosedAt == nil || activation.PhoneNumber != "+12025550123" || activation.ActivationID != "activation-1" {
 		t.Fatalf("activation=%+v", activation)
+	}
+}
+
+func TestSMSPhoneWaitCodeRequestsRetryForSameNumber(t *testing.T) {
+	producer, registration := codexIntegrationTestProducer(t)
+	for key, value := range map[string]string{
+		"sms_platform": "hero-sms", "sms_api_key": "key", "sms_country": "187", "sms_max_price": "0.5", "sms_timeout": "30",
+	} {
+		if err := producer.db.Create(&models.Setting{Key: key, Value: value}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	allocations := 0
+	statusChecks := 0
+	var statuses []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getNumber":
+			allocations++
+			fmt.Fprint(w, "ACCESS_NUMBER:activation-1:12025550123")
+		case "setStatus":
+			statuses = append(statuses, r.URL.Query().Get("status"))
+			fmt.Fprint(w, "ACCESS_READY")
+		case "getStatus":
+			statusChecks++
+			if statusChecks == 1 {
+				fmt.Fprint(w, "STATUS_OK:111111")
+			} else {
+				fmt.Fprint(w, "STATUS_WAIT_RETRY:222222")
+			}
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	producer.newSMSClient = func(config smsactivate.Config) (*smsactivate.Client, error) {
+		return smsactivate.New(config, smsactivate.WithEndpoint(server.URL), smsactivate.WithHTTPClient(server.Client()))
+	}
+	session, err := producer.acquireSMSPhone(context.Background(), registration.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := session.WaitCode(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := session.WaitCode(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != "111111" || second != "222222" || allocations != 1 || strings.Join(statuses, ",") != "1,3" {
+		t.Fatalf("first=%q second=%q allocations=%d statuses=%v", first, second, allocations, statuses)
+	}
+	if err := session.Finish(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAcquireSMSPhoneBlocksConcurrentOrder(t *testing.T) {
+	producer, registration := codexIntegrationTestProducer(t)
+	for key, value := range map[string]string{
+		"sms_platform": "hero-sms", "sms_api_key": "key", "sms_country": "187", "sms_max_price": "0.5", "sms_timeout": "30",
+	} {
+		if err := producer.db.Create(&models.Setting{Key: key, Value: value}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var allocations int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getNumber":
+			allocations++
+			fmt.Fprintf(w, "ACCESS_NUMBER:activation-%d:1202555012%d", allocations, allocations)
+		case "setStatus":
+			fmt.Fprint(w, "ACCESS_CANCEL")
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	producer.newSMSClient = func(config smsactivate.Config) (*smsactivate.Client, error) {
+		return smsactivate.New(config, smsactivate.WithEndpoint(server.URL), smsactivate.WithHTTPClient(server.Client()))
+	}
+	first, err := producer.acquireSMSPhone(context.Background(), registration.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := producer.acquireSMSPhone(context.Background(), registration.ID); err == nil || !strings.Contains(err.Error(), "进行中的接码订单") {
+		t.Fatalf("second acquire error=%v", err)
+	}
+	if allocations != 1 {
+		t.Fatalf("allocations=%d", allocations)
+	}
+	if err := first.Finish(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := producer.acquireSMSPhone(context.Background(), registration.ID); err != nil {
+		t.Fatal(err)
+	}
+	if allocations != 2 {
+		t.Fatalf("allocations after release=%d", allocations)
+	}
+}
+
+func TestAcquireSMSPhoneRecoversCloseFailedOrder(t *testing.T) {
+	producer, registration := codexIntegrationTestProducer(t)
+	for key, value := range map[string]string{
+		"sms_platform": "hero-sms", "sms_api_key": "key", "sms_country": "187", "sms_max_price": "0.5", "sms_timeout": "30",
+	} {
+		if err := producer.db.Create(&models.Setting{Key: key, Value: value}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	allocations := 0
+	closeCalls := 0
+	var events []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getNumber":
+			allocations++
+			events = append(events, fmt.Sprintf("allocate:%d", allocations))
+			fmt.Fprintf(w, "ACCESS_NUMBER:activation-%d:1202555012%d", allocations, allocations)
+		case "setStatus":
+			closeCalls++
+			events = append(events, "close:"+r.URL.Query().Get("id"))
+			if closeCalls == 1 {
+				http.Error(w, "temporary close failure", http.StatusBadGateway)
+				return
+			}
+			fmt.Fprint(w, "ACCESS_CANCEL")
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	producer.newSMSClient = func(config smsactivate.Config) (*smsactivate.Client, error) {
+		return smsactivate.New(config, smsactivate.WithEndpoint(server.URL), smsactivate.WithHTTPClient(server.Client()))
+	}
+	first, err := producer.acquireSMSPhone(context.Background(), registration.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Finish(context.Background(), false); err == nil {
+		t.Fatal("first Finish returned nil error")
+	}
+	var failed models.SMSActivation
+	if err := producer.db.First(&failed, "activation_id = ?", "activation-1").Error; err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != "close_failed" {
+		t.Fatalf("failed=%+v", failed)
+	}
+	if _, err := producer.acquireSMSPhone(context.Background(), registration.ID); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(events, ",") != "allocate:1,close:activation-1,close:activation-1,allocate:2" {
+		t.Fatalf("events=%v", events)
+	}
+	if err := producer.db.First(&failed, failed.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != "cancelled" || failed.ClosedAt == nil {
+		t.Fatalf("recovered=%+v", failed)
+	}
+}
+
+func TestAcquireSMSPhoneClosesHistoricalOrderFirst(t *testing.T) {
+	producer, registration := codexIntegrationTestProducer(t)
+	for key, value := range map[string]string{
+		"sms_platform": "hero-sms", "sms_api_key": "key", "sms_country": "187", "sms_max_price": "0.5", "sms_timeout": "30",
+	} {
+		if err := producer.db.Create(&models.Setting{Key: key, Value: value}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	historical := models.SMSActivation{
+		RegistrationID: registration.ID, Provider: "hero-sms", ActivationID: "old-activation", PhoneNumber: "+12025550120",
+		CountryID: 187, Service: smsactivate.ServiceOpenAI, Status: "orphaned", CreatedAt: time.Now().Add(-3 * time.Minute),
+	}
+	if err := producer.db.Create(&historical).Error; err != nil {
+		t.Fatal(err)
+	}
+	var events []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "setStatus":
+			events = append(events, "cancel:"+r.URL.Query().Get("id"))
+			fmt.Fprint(w, "ACCESS_CANCEL")
+		case "getNumber":
+			events = append(events, "allocate")
+			fmt.Fprint(w, "ACCESS_NUMBER:new-activation:12025550121")
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	producer.newSMSClient = func(config smsactivate.Config) (*smsactivate.Client, error) {
+		return smsactivate.New(config, smsactivate.WithEndpoint(server.URL), smsactivate.WithHTTPClient(server.Client()))
+	}
+	if _, err := producer.acquireSMSPhone(context.Background(), registration.ID); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(events, ",") != "cancel:old-activation,allocate" {
+		t.Fatalf("events=%v", events)
+	}
+	if err := producer.db.First(&historical, historical.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if historical.Status != "cancelled" || historical.ClosedAt == nil {
+		t.Fatalf("historical=%+v", historical)
+	}
+}
+
+func TestRejectedSMSPhoneCreatesReplacementOrder(t *testing.T) {
+	producer, registration := codexIntegrationTestProducer(t)
+	for key, value := range map[string]string{
+		"sms_platform": "hero-sms", "sms_api_key": "key", "sms_country": "187", "sms_max_price": "0.5", "sms_timeout": "30",
+	} {
+		if err := producer.db.Create(&models.Setting{Key: key, Value: value}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var allocations int
+	var statuses []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getNumber":
+			allocations++
+			fmt.Fprintf(w, "ACCESS_NUMBER:activation-%d:1202555012%d", allocations, allocations)
+		case "setStatus":
+			statuses = append(statuses, r.URL.Query().Get("id")+":"+r.URL.Query().Get("status"))
+			fmt.Fprint(w, "ACCESS_READY")
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	producer.newSMSClient = func(config smsactivate.Config) (*smsactivate.Client, error) {
+		return smsactivate.New(config, smsactivate.WithEndpoint(server.URL), smsactivate.WithHTTPClient(server.Client()))
+	}
+	first, err := producer.acquireSMSPhone(context.Background(), registration.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Finish(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	second, err := producer.acquireSMSPhone(context.Background(), registration.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Number == second.Number || allocations != 2 || strings.Join(statuses, ",") != "activation-1:8" {
+		t.Fatalf("first=%q second=%q allocations=%d statuses=%v", first.Number, second.Number, allocations, statuses)
+	}
+	var rows []models.SMSActivation
+	if err := producer.db.Order("id").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].Status != "cancelled" || rows[0].ClosedAt == nil || rows[1].Status != "allocated" || rows[1].ClosedAt != nil {
+		t.Fatalf("rows=%+v", rows)
 	}
 }
 

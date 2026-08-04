@@ -3,6 +3,7 @@ package producer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,7 +12,6 @@ import (
 
 	"chatgpt-register/internal/codexoauth"
 	"chatgpt-register/internal/integrationcfg"
-	"chatgpt-register/internal/mailfetch"
 	"chatgpt-register/internal/models"
 	"chatgpt-register/internal/smsactivate"
 	"chatgpt-register/internal/sub2api"
@@ -19,7 +19,11 @@ import (
 	"gorm.io/gorm"
 )
 
+const smsOrderCloseTimeout = 2*time.Minute + 15*time.Second
+
 var integrationLocks [64]sync.Mutex
+
+type smsClientFactory func(smsactivate.Config) (*smsactivate.Client, error)
 
 func (p *Producer) AuthorizeCodex(ctx context.Context, registrationID uint) (codexoauth.Tokens, error) {
 	lock := &integrationLocks[int(registrationID)%len(integrationLocks)]
@@ -56,8 +60,8 @@ func (p *Producer) AuthorizeCodex(ctx context.Context, registrationID uint) (cod
 		unlock()
 		return codexoauth.Tokens{}, fmt.Errorf("读取邮箱失败: %w", err)
 	}
-	mailAccount := mailfetch.Account{Email: mailbox.Email, ClientID: mailbox.ClientID, RefreshToken: mailbox.RefreshToken}
-	existingMessages, err := p.mail.ListMessages(ctx, mailAccount, 30)
+	account := mailAccount(mailbox)
+	existingMessages, err := p.mail.ListMessages(ctx, account, 30)
 	if err != nil {
 		safeErr := codexSafeError(fmt.Errorf("读取授权前邮件快照失败: %w", err), registration)
 		p.setCodexFailed(registration.ID, safeErr)
@@ -76,6 +80,12 @@ func (p *Producer) AuthorizeCodex(ctx context.Context, registrationID uint) (cod
 	if acquirePhone == nil {
 		acquirePhone = p.acquireSMSPhone
 	}
+	maxPhoneAttempts := integrationcfg.DefaultSMSPhoneAttempts
+	if values, configErr := integrationcfg.Load(p.db); configErr == nil {
+		if smsConfig, smsErr := values.SMS(); smsErr == nil {
+			maxPhoneAttempts = smsConfig.MaxPhoneAttempts
+		}
+	}
 	since := time.Now()
 	tokens, err := authorizer(ctx, codexoauth.Input{
 		Email: registration.Email, Password: registration.Password, Proxy: registration.Proxy,
@@ -86,6 +96,7 @@ func (p *Producer) AuthorizeCodex(ctx context.Context, registrationID uint) (cod
 		AcquirePhone: func(phoneCtx context.Context) (*codexoauth.PhoneSession, error) {
 			return acquirePhone(phoneCtx, registration.ID)
 		},
+		MaxPhoneAttempts: maxPhoneAttempts,
 		Log: func(format string, values ...any) {
 			p.appendIntegrationLog(registration.ID, fmt.Sprintf(format, values...))
 		},
@@ -119,7 +130,68 @@ func (p *Producer) AuthorizeCodex(ctx context.Context, registrationID uint) (cod
 	return tokens, nil
 }
 
+func (p *Producer) acquireSMSLease(registrationID uint) (*smsLeaseToken, error) {
+	p.smsMu.Lock()
+	defer p.smsMu.Unlock()
+	if p.smsLease == nil {
+		p.smsLease = make(map[uint]*smsLeaseToken)
+	}
+	if _, exists := p.smsLease[registrationID]; exists {
+		return nil, fmt.Errorf("该账号已有进行中的接码订单")
+	}
+	token := &smsLeaseToken{}
+	p.smsLease[registrationID] = token
+	return token, nil
+}
+
+func (p *Producer) releaseSMSLease(registrationID uint, token *smsLeaseToken) {
+	p.smsMu.Lock()
+	defer p.smsMu.Unlock()
+	if p.smsLease[registrationID] == token {
+		delete(p.smsLease, registrationID)
+	}
+}
+
+func (p *Producer) cancelPendingSMSActivations(ctx context.Context, registrationID uint, config smsactivate.Config, newClient smsClientFactory) error {
+	var pending []models.SMSActivation
+	if err := p.db.Where("registration_id = ? AND status NOT IN ?", registrationID, []string{"completed", "cancelled"}).Order("id").Find(&pending).Error; err != nil {
+		return err
+	}
+	for _, row := range pending {
+		rowConfig := config
+		rowConfig.Platform = smsactivate.Platform(row.Provider)
+		client, err := newClient(rowConfig)
+		if err != nil {
+			return fmt.Errorf("创建历史接码订单客户端失败: %w", err)
+		}
+		if _, err := client.CancelActivation(ctx, row.ActivationID, row.CreatedAt); err != nil {
+			p.db.Model(&models.SMSActivation{}).Where("id = ?", row.ID).Updates(map[string]any{
+				"status": "close_failed", "error": truncateStr(err.Error(), 500),
+			})
+			return fmt.Errorf("历史接码订单 #%s 尚未关闭: %w", row.ActivationID, err)
+		}
+		now := time.Now()
+		if err := p.db.Model(&models.SMSActivation{}).Where("id = ?", row.ID).Updates(map[string]any{
+			"status": "cancelled", "error": "", "closed_at": now,
+		}).Error; err != nil {
+			return err
+		}
+		p.appendIntegrationLog(registrationID, fmt.Sprintf("已关闭历史接码订单 %s #%s", row.Provider, row.ActivationID))
+	}
+	return nil
+}
+
 func (p *Producer) acquireSMSPhone(ctx context.Context, registrationID uint) (*codexoauth.PhoneSession, error) {
+	lease, err := p.acquireSMSLease(registrationID)
+	if err != nil {
+		return nil, err
+	}
+	releaseLease := true
+	defer func() {
+		if releaseLease {
+			p.releaseSMSLease(registrationID, lease)
+		}
+	}()
 	values, err := integrationcfg.Load(p.db)
 	if err != nil {
 		return nil, err
@@ -133,6 +205,9 @@ func (p *Producer) acquireSMSPhone(ctx context.Context, registrationID uint) (*c
 		newClient = func(clientConfig smsactivate.Config) (*smsactivate.Client, error) {
 			return smsactivate.New(clientConfig)
 		}
+	}
+	if err := p.cancelPendingSMSActivations(ctx, registrationID, config.Client, newClient); err != nil {
+		return nil, err
 	}
 	client, err := newClient(config.Client)
 	if err != nil {
@@ -148,17 +223,25 @@ func (p *Producer) acquireSMSPhone(ctx context.Context, registrationID uint) (*c
 		CountryID: activation.Country, Service: smsactivate.ServiceOpenAI, Status: "allocated",
 	}
 	if err := p.db.Create(&row).Error; err != nil {
-		closeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		_, _ = activation.Close(closeCtx, false)
+		closeCtx, cancel := context.WithTimeout(context.Background(), smsOrderCloseTimeout)
+		_, closeErr := activation.Close(closeCtx, false)
 		cancel()
+		if closeErr != nil {
+			releaseLease = false
+			return nil, fmt.Errorf("保存接码订单失败且供应商订单未关闭: %v: %w", err, closeErr)
+		}
 		return nil, err
 	}
 	p.appendIntegrationLog(registrationID, fmt.Sprintf("按需购买接码号码 %s（%s #%s）", maskPhone(activation.E164), config.Client.Platform, activation.ActivationID))
+	releaseLease = false
 	var finishMu sync.Mutex
 	finishChosen := false
 	finishSuccess := false
 	return &codexoauth.PhoneSession{
 		Number: activation.E164,
+		ReplaceOnError: func(waitErr error) bool {
+			return smsactivate.IsCode(waitErr, "STATUS_CANCEL") || errors.Is(waitErr, context.DeadlineExceeded)
+		},
 		WaitCode: func(waitCtx context.Context) (string, error) {
 			p.db.Model(&models.SMSActivation{}).Where("id = ?", row.ID).Update("status", "waiting")
 			pollCtx, cancel := context.WithTimeout(waitCtx, config.PollTimeout)
@@ -191,7 +274,9 @@ func (p *Producer) acquireSMSPhone(ctx context.Context, registrationID uint) (*c
 				updates["status"] = "close_failed"
 				updates["error"] = truncateStr(closeErr.Error(), 500)
 			}
-			if dbErr := p.db.Model(&models.SMSActivation{}).Where("id = ?", row.ID).Updates(updates).Error; dbErr != nil && closeErr == nil {
+			dbErr := p.db.Model(&models.SMSActivation{}).Where("id = ?", row.ID).Updates(updates).Error
+			p.releaseSMSLease(registrationID, lease)
+			if dbErr != nil && closeErr == nil {
 				return dbErr
 			}
 			return closeErr

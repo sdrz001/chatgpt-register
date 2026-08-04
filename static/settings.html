@@ -33,11 +33,20 @@
         </div>
         <div class="field">
           <label>裂变数量</label>
-          <span class="field-hint">每个账号最多可继续裂变的次数</span>
+          <span class="field-hint">每个母账号最多创建的裂变账号数；设为 0 表示只注册母账号</span>
           <div class="input-suffix">
-            <input id="set-fission-count" class="px-input" type="number" min="1" max="100" placeholder="默认 5">
+            <input id="set-fission-count" class="px-input" type="number" min="0" max="100" placeholder="默认 5">
             <span class="suffix">次</span>
           </div>
+        </div>
+        <div class="field">
+          <label>浏览器模式</label>
+          <span class="field-hint">有头模式会显示 Chrome 窗口，便于查看注册过程</span>
+          <label class="switch-row">
+            <input id="set-browser-visible" type="checkbox" onchange="updateBrowserModeLabel()">
+            <span class="switch-ui"></span>
+            <span id="browser-mode-label" class="switch-label">无头模式（后台运行）</span>
+          </label>
         </div>
         <div class="settings-foot">
           <button class="px-btn primary" onclick="saveSettings()">保存设置</button>
@@ -103,18 +112,25 @@
             <input id="set-sms-api-key" class="px-input" type="password" autocomplete="new-password" placeholder="留空保留已保存密钥">
           </div>
           <div class="field">
-            <label>国家</label>
-            <select id="set-sms-country" class="px-input">
+            <label>接码服务</label>
+            <span class="field-hint">固定购买 OpenAI 服务，服务代码由系统锁定为 dr</span>
+            <input id="set-sms-service" class="px-input" value="OpenAI（dr）" disabled>
+          </div>
+          <div class="field">
+            <label>国家模式</label>
+            <span class="field-hint">固定国家只在该国购号；随机模式按候选列表尝试</span>
+            <select id="set-sms-country" class="px-input" onchange="updateSMSCountryMode()">
               <option value="random">随机候选国家</option>
             </select>
           </div>
-          <div class="field">
-            <label>随机候选国家 ID</label>
-            <span class="field-hint">逗号分隔，仅随机模式使用</span>
+          <div id="sms-random-countries-field" class="field">
+            <label>随机模式候选国家 ID</label>
+            <span class="field-hint">逗号分隔；仅选择“随机候选国家”时生效</span>
             <input id="set-sms-random-countries" class="px-input" placeholder="187,16,36,43">
           </div>
           <div class="field">
-            <label>最高单价</label>
+            <label>最高单价 / 每个号码</label>
+            <span class="field-hint">每次购号请求都使用此价格上限，超过时不购买</span>
             <div class="input-suffix">
               <input id="set-sms-max-price" class="px-input" type="number" min="0.01" max="5" step="0.01">
               <span class="suffix">$</span>
@@ -126,6 +142,11 @@
               <input id="set-sms-timeout" class="px-input" type="number" min="30" max="600">
               <span class="suffix">秒</span>
             </div>
+          </div>
+          <div class="field">
+            <label>号码尝试上限</label>
+            <span class="field-hint">单次 Codex 授权最多购买的号码数，包含首次购号</span>
+            <input id="set-sms-phone-attempts" class="px-input" type="number" min="1" max="10">
           </div>
         </div>
         <div id="sms-balance-result" class="proxy-result" style="display:none"></div>
@@ -224,11 +245,15 @@
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js"></script>
 <script>
+let smsMeta = {};
+
 async function loadSettings() {
   const r = await api('/api/settings');
   const d = await r.json();
   document.getElementById('set-max-concurrency').value = d.max_concurrency || '10';
   document.getElementById('set-fission-count').value = d.fission_count || '5';
+  document.getElementById('set-browser-visible').checked = d.headless === '0';
+  updateBrowserModeLabel();
   document.getElementById('set-proxy-enabled').checked = d.proxy_enabled === '1';
   document.getElementById('set-proxy-list').value = d.proxy_list || '';
   document.getElementById('set-codex-auto-authorize').checked = d.codex_auto_authorize === '1';
@@ -236,9 +261,10 @@ async function loadSettings() {
   document.getElementById('set-sms-api-key').value = '';
   document.getElementById('sms-api-key-hint').textContent = d.sms_api_key_configured === '1' ? '已保存 API Key；留空保持不变' : '尚未配置';
   document.getElementById('set-sms-country').value = d.sms_country || 'random';
-  document.getElementById('set-sms-random-countries').value = d.sms_random_countries || '187,16,36,43';
-  document.getElementById('set-sms-max-price').value = d.sms_max_price || '0.5';
+  document.getElementById('set-sms-random-countries').value = d.sms_random_countries || smsMeta.default_random_countries || '';
+  document.getElementById('set-sms-max-price').value = d.sms_max_price || String(smsMeta.default_max_price || 0.5);
   document.getElementById('set-sms-timeout').value = d.sms_timeout || '180';
+  document.getElementById('set-sms-phone-attempts').value = d.sms_phone_attempts || String(smsMeta.default_phone_attempts || 3);
   document.getElementById('set-sub2api-auto-import').checked = d.sub2api_auto_import === '1';
   document.getElementById('set-sub2api-url').value = d.sub2api_url || '';
   document.getElementById('set-sub2api-api-key').value = '';
@@ -250,6 +276,17 @@ async function loadSettings() {
   updateProxyCount();
   syncSelect('set-sms-platform');
   syncSelect('set-sms-country');
+  updateSMSCountryMode();
+}
+
+function updateBrowserModeLabel() {
+  const visible = document.getElementById('set-browser-visible').checked;
+  document.getElementById('browser-mode-label').textContent = visible ? '有头模式（显示 Chrome）' : '无头模式（后台运行）';
+}
+
+function updateSMSCountryMode() {
+  const random = document.getElementById('set-sms-country').value === 'random';
+  document.getElementById('sms-random-countries-field').style.display = random ? '' : 'none';
 }
 
 function proxyLines() {
@@ -317,6 +354,7 @@ async function saveSettings() {
   const body = {
     max_concurrency: document.getElementById('set-max-concurrency').value.trim(),
     fission_count: document.getElementById('set-fission-count').value.trim(),
+    headless: document.getElementById('set-browser-visible').checked ? '0' : '1',
   };
   const r = await saveSettingBody(body);
   if (!r.ok) return toast('保存失败', true);
@@ -359,20 +397,23 @@ async function saveSettingBody(body) {
 async function saveSMSSettings() {
   const price = Number(document.getElementById('set-sms-max-price').value);
   const timeout = Number.parseInt(document.getElementById('set-sms-timeout').value, 10);
+  const attempts = Number.parseInt(document.getElementById('set-sms-phone-attempts').value, 10);
   const country = document.getElementById('set-sms-country').value;
-  const candidates = parseIDList(document.getElementById('set-sms-random-countries').value);
+  const candidates = country === 'random' ? parseIDList(document.getElementById('set-sms-random-countries').value) : [];
   if (!(price > 0 && price <= 5)) return toast('最高单价必须在 0 到 5 美元之间', true);
   if (!Number.isInteger(timeout) || timeout < 30 || timeout > 600) return toast('收码超时必须在 30 到 600 秒之间', true);
+  if (!Number.isInteger(attempts) || attempts < 1 || attempts > 10) return toast('号码尝试上限必须在 1 到 10 之间', true);
   if (country === 'random' && !candidates.length) return toast('随机国家候选列表不能为空', true);
   const body = {
     codex_auto_authorize: document.getElementById('set-codex-auto-authorize').checked ? '1' : '0',
     sms_platform: document.getElementById('set-sms-platform').value,
     sms_api_key: document.getElementById('set-sms-api-key').value.trim(),
     sms_country: country,
-    sms_random_countries: candidates.join(','),
     sms_max_price: String(price),
     sms_timeout: String(timeout),
+    sms_phone_attempts: String(attempts),
   };
+  if (country === 'random') body.sms_random_countries = candidates.join(',');
   const r = await saveSettingBody(body);
   const d = await r.json().catch(() => ({}));
   if (!r.ok) return toast(d.error || '保存失败', true);
@@ -460,6 +501,12 @@ async function loadSMSMeta() {
   const r = await api('/api/sms-platform/meta');
   if (!r.ok) return;
   const d = await r.json();
+  smsMeta = d;
+  document.getElementById('set-sms-service').value = (d.service_label || 'OpenAI') + '（' + (d.service || 'dr') + '）';
+  document.getElementById('set-sms-max-price').max = String(d.max_price_limit || 5);
+  const attempts = document.getElementById('set-sms-phone-attempts');
+  attempts.min = String(d.minimum_phone_attempts || 1);
+  attempts.max = String(d.maximum_phone_attempts || 10);
   const select = document.getElementById('set-sms-country');
   const current = select.value;
   select.innerHTML = '<option value="random">随机候选国家</option>' + (d.countries || []).map(country =>

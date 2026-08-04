@@ -30,7 +30,7 @@ var allowedSettingKeys = map[string]bool{
 	"max_concurrency": true, "fission_count": true, "headless": true,
 	"proxy_enabled": true, "proxy_list": true,
 	"codex_auto_authorize": true, "sms_platform": true, "sms_api_key": true,
-	"sms_country": true, "sms_random_countries": true, "sms_max_price": true, "sms_timeout": true,
+	"sms_country": true, "sms_random_countries": true, "sms_max_price": true, "sms_timeout": true, "sms_phone_attempts": true,
 	"sub2api_auto_import": true, "sub2api_url": true, "sub2api_api_key": true,
 	"sub2api_group_ids": true, "sub2api_concurrency": true, "sub2api_priority": true, "sub2api_timeout": true,
 }
@@ -122,7 +122,7 @@ func validateSettings(values integrationcfg.Values, updates map[string]string) e
 		label    string
 	}{
 		{"max_concurrency", 10, 1, 100, "最大并发数"},
-		{"fission_count", 5, 1, 100, "裂变数量"},
+		{"fission_count", 5, 0, 100, "裂变数量"},
 	} {
 		if _, changed := updates[setting.key]; !changed {
 			continue
@@ -139,7 +139,7 @@ func validateSettings(values integrationcfg.Values, updates map[string]string) e
 			return fmt.Errorf("%s必须在 %d 到 %d 之间", setting.label, setting.minimum, setting.maximum)
 		}
 	}
-	if touchesAny(updates, "codex_auto_authorize", "sms_platform", "sms_api_key", "sms_country", "sms_random_countries", "sms_max_price", "sms_timeout") {
+	if touchesAny(updates, "codex_auto_authorize", "sms_platform", "sms_api_key", "sms_country", "sms_random_countries", "sms_max_price", "sms_timeout", "sms_phone_attempts") {
 		smsValues := cloneSettings(values)
 		if !values.CodexAutoAuthorize() && strings.TrimSpace(smsValues["sms_api_key"]) == "" {
 			smsValues["sms_api_key"] = "not-enabled"

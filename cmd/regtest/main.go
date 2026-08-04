@@ -22,6 +22,7 @@ type cfg struct {
 	Email        string `json:"email"`
 	ClientID     string `json:"client_id"`
 	RefreshToken string `json:"refresh_token"`
+	CodeURL      string `json:"code_url"`
 	Proxy        string `json:"proxy"`
 	Headless     bool   `json:"headless"`
 }
@@ -45,7 +46,7 @@ func main() {
 	}
 
 	mail := mailfetch.New()
-	acc := mailfetch.Account{Email: c.Email, ClientID: c.ClientID, RefreshToken: c.RefreshToken}
+	acc := mailfetch.Account{Email: c.Email, ClientID: c.ClientID, RefreshToken: c.RefreshToken, CodeURL: c.CodeURL}
 	since := time.Now().Add(-30 * time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)

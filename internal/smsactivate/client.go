@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const maxResponseBytes = 1 << 20
@@ -166,6 +167,15 @@ func (c *Client) Allocate(ctx context.Context) (*Activation, error) {
 		return nil, err
 	}
 	return newActivation(c, number), nil
+}
+
+func (c *Client) CancelActivation(ctx context.Context, activationID string, createdAt time.Time) (string, error) {
+	activation := &Activation{client: c, ActivationID: strings.TrimSpace(activationID), createdAt: createdAt}
+	result, err := activation.Close(ctx, false)
+	if IsCode(err, "NO_ACTIVATION") || IsCode(err, "WRONG_ACTIVATION_ID") || IsCode(err, "NO_ACTIVATIONS") {
+		return "ALREADY_CLOSED", nil
+	}
+	return result, err
 }
 
 func (c *Client) call(ctx context.Context, action string, params url.Values) (string, error) {

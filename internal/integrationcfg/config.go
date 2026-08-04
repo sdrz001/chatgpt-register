@@ -14,17 +14,24 @@ import (
 )
 
 const (
-	defaultSMSCountries = "187,16,36,43"
-	defaultSMSMaxPrice  = 0.5
-	defaultSMSTimeout   = 180
+	defaultSMSCountries     = "187,16,36,43"
+	defaultSMSMaxPrice      = 0.5
+	defaultSMSTimeout       = 180
+	DefaultSMSPhoneAttempts = 3
+	MaximumSMSPhoneAttempts = 10
 )
+
+func DefaultSMSRandomCountries() string {
+	return defaultSMSCountries
+}
 
 type Values map[string]string
 
 type SMSConfig struct {
-	Client       smsactivate.Config
-	PollTimeout  time.Duration
-	PollInterval time.Duration
+	Client           smsactivate.Config
+	PollTimeout      time.Duration
+	PollInterval     time.Duration
+	MaxPhoneAttempts int
 }
 
 func Load(db *gorm.DB) (Values, error) {
@@ -86,10 +93,17 @@ func (v Values) SMS() (SMSConfig, error) {
 	if err != nil {
 		return SMSConfig{}, err
 	}
+	attempts, err := boundedInt(v["sms_phone_attempts"], DefaultSMSPhoneAttempts, 1, MaximumSMSPhoneAttempts, "号码尝试上限")
+	if err != nil {
+		return SMSConfig{}, err
+	}
 	if err := clientConfig.Validate(); err != nil {
 		return SMSConfig{}, err
 	}
-	return SMSConfig{Client: clientConfig, PollTimeout: time.Duration(seconds) * time.Second, PollInterval: 5 * time.Second}, nil
+	return SMSConfig{
+		Client: clientConfig, PollTimeout: time.Duration(seconds) * time.Second,
+		PollInterval: 5 * time.Second, MaxPhoneAttempts: attempts,
+	}, nil
 }
 
 func (v Values) Sub2API(overrides ...string) (sub2api.Config, error) {

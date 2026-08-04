@@ -86,6 +86,25 @@ func TestSettingsValidationIsAtomic(t *testing.T) {
 	}
 }
 
+func TestSettingsAllowZeroFissionCount(t *testing.T) {
+	h, r := settingsTestHandler(t)
+	response := putSettings(r, `{"fission_count":"0"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var setting models.Setting
+	if err := h.DB.First(&setting, "key = ?", "fission_count").Error; err != nil {
+		t.Fatal(err)
+	}
+	if setting.Value != "0" {
+		t.Fatalf("fission_count=%q", setting.Value)
+	}
+	response = putSettings(r, `{"fission_count":"-1"}`)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "0 到 100") {
+		t.Fatalf("negative status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestSettingsDisabledIntegrationsAllowPreconfiguration(t *testing.T) {
 	_, r := settingsTestHandler(t)
 	for _, body := range []string{
@@ -109,6 +128,18 @@ func TestSettingsEnabledIntegrationsRequireSecrets(t *testing.T) {
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 		}
+	}
+}
+
+func TestSettingsRejectInvalidSMSPhoneAttempts(t *testing.T) {
+	h, r := settingsTestHandler(t)
+	response := putSettings(r, `{"codex_auto_authorize":"0","sms_platform":"hero-sms","sms_country":"187","sms_phone_attempts":"11"}`)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "号码尝试上限") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var count int64
+	if err := h.DB.Model(&models.Setting{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("partial settings persisted: count=%d error=%v", count, err)
 	}
 }
 

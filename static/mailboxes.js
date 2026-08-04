@@ -128,14 +128,19 @@ function parseImportLines(text) {
   text.split(/\r?\n/).forEach(line => {
     line = line.trim();
     if (!line) return;
+    const firstDelimiter = line.match(/-{4,}/);
+    if (!firstDelimiter) return;
+    const email = line.slice(0, firstDelimiter.index).trim();
+    if (!email.includes('@')) return;
+    const remainder = line.slice(firstDelimiter.index + firstDelimiter[0].length).trim();
+    const codeURLIndex = remainder.search(/https?:\/\//i);
+    if (codeURLIndex >= 0) {
+      items.push({ email, code_url: remainder.slice(codeURLIndex).trim() });
+      return;
+    }
     const parts = line.split('----').map(p => p.trim());
-    if (parts.length !== 4 || !parts[0].includes('@')) return;
-    items.push({
-      email: parts[0],
-      password: parts[1],
-      client_id: parts[2],
-      refresh_token: parts[3],
-    });
+    if (parts.length !== 4) return;
+    items.push({ email, password: parts[1], client_id: parts[2], refresh_token: parts[3] });
   });
   return items;
 }
@@ -219,6 +224,9 @@ function openMailboxModal(data) {
   document.getElementById('mb-provider').value = data ? data.provider : '';
   document.getElementById('mb-client-id').value = data ? data.client_id : '';
   document.getElementById('mb-refresh-token').value = data ? data.refresh_token : '';
+  const codeURL = document.getElementById('mb-code-url');
+  codeURL.value = '';
+  codeURL.placeholder = data && data.code_url_configured ? '已配置；留空保持不变' : '输入 http/https 取码 API 地址';
   document.getElementById('mb-status').value = data ? data.status : 'unverified';
   syncSelect('mb-status');
   document.getElementById('mb-note').value = data ? data.note : '';
@@ -237,6 +245,7 @@ async function saveMailbox() {
     provider: document.getElementById('mb-provider').value.trim(),
     client_id: document.getElementById('mb-client-id').value.trim(),
     refresh_token: document.getElementById('mb-refresh-token').value.trim(),
+    code_url: document.getElementById('mb-code-url').value.trim(),
     status: document.getElementById('mb-status').value,
     note: document.getElementById('mb-note').value,
   };

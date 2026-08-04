@@ -46,6 +46,7 @@
     <label>服务商</label><input id="mb-provider" class="px-input" placeholder="outlook / gmail ...">
     <label>Client ID（Outlook 取件用）</label><input id="mb-client-id" class="px-input">
     <label>Refresh Token（Outlook 取件用）</label><textarea id="mb-refresh-token" class="px-input" rows="2"></textarea>
+    <label>取码 API 地址</label><input id="mb-code-url" class="px-input" type="password" autocomplete="new-password" placeholder="留空保留已保存地址">
     <label>状态</label>
     <select id="mb-status" class="px-input">
       <option value="unverified">待验证</option>
@@ -65,9 +66,11 @@
 <div class="modal-mask" id="import-modal" style="display:none">
   <div class="modal px-panel" style="width:620px">
     <h2>批量导入邮箱</h2>
-    <div class="import-sub">每行一个，重复 email 自动跳过，格式：</div>
+    <div class="import-sub">每行一个，重复 email 自动跳过，支持以下格式：</div>
     <div class="import-formats">
       <code>someone@outlook.com----密码----client_id----refresh_token</code>
+      <code>someone@icloud.com-----取码 API 地址</code>
+      <code>someone@icloud.com-----任意中间字段-----取码 API 地址</code>
     </div>
     <textarea id="import-text" class="px-input import-textarea" rows="11" placeholder="在此粘贴内容，或直接把 txt 文件拖到这里 ..."></textarea>
     <div class="modal-actions">
@@ -100,6 +103,6 @@
 
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js"></script>
-<script src="/static/mailboxes.js?v=7"></script>
+<script src="/static/mailboxes.js?v=8"></script>
 </body>
 </html>

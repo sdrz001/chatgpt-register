@@ -15,20 +15,22 @@ import (
 )
 
 type PhoneSession struct {
-	Number   string
-	WaitCode func(context.Context) (string, error)
-	Finish   func(context.Context, bool) error
+	Number         string
+	WaitCode       func(context.Context) (string, error)
+	Finish         func(context.Context, bool) error
+	ReplaceOnError func(error) bool
 }
 
 type Input struct {
-	Email          string
-	Password       string
-	Proxy          string
-	Headless       bool
-	FetchEmailCode func(context.Context) (string, error)
-	AcquirePhone   func(context.Context) (*PhoneSession, error)
-	Log            func(string, ...any)
-	SaveShot       func([]byte)
+	Email            string
+	Password         string
+	Proxy            string
+	Headless         bool
+	FetchEmailCode   func(context.Context) (string, error)
+	AcquirePhone     func(context.Context) (*PhoneSession, error)
+	MaxPhoneAttempts int
+	Log              func(string, ...any)
+	SaveShot         func([]byte)
 }
 
 func (in Input) logf(format string, values ...any) {

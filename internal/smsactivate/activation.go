@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const cancelRetryAge = 2*time.Minute + 2*time.Second
+
 type Activation struct {
 	client *Client
 
@@ -23,6 +25,7 @@ type Activation struct {
 	closeStatus  int
 	closeResult  string
 	closeErr     error
+	createdAt    time.Time
 }
 
 func newActivation(client *Client, number Number) *Activation {
@@ -36,6 +39,7 @@ func newActivation(client *Client, number Number) *Activation {
 		Number:       number.Phone,
 		E164:         e164,
 		Country:      number.Country,
+		createdAt:    time.Now(),
 	}
 }
 
@@ -74,6 +78,12 @@ func (a *Activation) PollCode(ctx context.Context, interval time.Duration) (stri
 				return current.Code, nil
 			}
 		case StatusCancel:
+			a.mu.Lock()
+			a.closed = true
+			a.closeStatus = 8
+			a.closeResult = "STATUS_CANCEL"
+			a.closeErr = nil
+			a.mu.Unlock()
 			return "", &Error{Code: "STATUS_CANCEL", Message: "激活已被取消"}
 		}
 		timer := time.NewTimer(interval)
@@ -123,6 +133,25 @@ func (a *Activation) Close(ctx context.Context, success bool) (string, error) {
 		a.mu.Unlock()
 
 		result, err := a.client.SetStatus(ctx, a.ActivationID, status)
+		if status == 8 && IsCode(err, "EARLY_CANCEL_DENIED") {
+			wait := time.Until(a.createdAt.Add(cancelRetryAge))
+			if wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					if !timer.Stop() {
+						<-timer.C
+					}
+					err = ctx.Err()
+				}
+			}
+			if err != nil && !IsCode(err, "EARLY_CANCEL_DENIED") {
+				result = ""
+			} else {
+				result, err = a.client.SetStatus(ctx, a.ActivationID, status)
+			}
+		}
 		a.mu.Lock()
 		a.closeResult = result
 		a.closeErr = err
