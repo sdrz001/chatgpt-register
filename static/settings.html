@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>系统设置 · ChatGPT 注册管理</title>
-<link rel="stylesheet" href="/static/style.css?v=8">
+<link rel="stylesheet" href="/static/style.css?v=14">
 </head>
 <body data-page="settings">
 <div class="layout">
@@ -40,12 +40,33 @@
           </div>
         </div>
         <div class="field">
+          <label>浏览器后端</label>
+          <select id="set-browser-backend" class="px-input" onchange="updateBrowserBackend()">
+            <option value="rod">模式1 当前浏览器（rod）</option>
+            <option value="cloakbrowser">模式2 Python CloakBrowser</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Python 路径</label>
+          <span class="field-hint">使用 Python CloakBrowser 时可指定 Python 可执行文件；留空使用默认路径</span>
+          <input id="set-python-executable" class="px-input" type="text" maxlength="1024" autocomplete="off" placeholder="例如 C:\Python311\python.exe">
+        </div>
+        <div class="field">
           <label>浏览器模式</label>
           <span class="field-hint">有头模式会显示 Chrome 窗口，便于查看注册过程</span>
           <label class="switch-row">
             <input id="set-browser-visible" type="checkbox" onchange="updateBrowserModeLabel()">
             <span class="switch-ui"></span>
             <span id="browser-mode-label" class="switch-label">无头模式（后台运行）</span>
+          </label>
+        </div>
+        <div class="field">
+          <label>AT 自动检测</label>
+          <span class="field-hint">关闭后停止启动扫描、定时复检和列表触发，只保留账户页的单个与多选手动检测</span>
+          <label class="switch-row">
+            <input id="set-at-auto-check" type="checkbox" onchange="updateATCheckModeLabel()">
+            <span class="switch-ui"></span>
+            <span id="at-check-mode-label" class="switch-label">自动检测已开启</span>
           </label>
         </div>
         <div class="settings-foot">
@@ -252,8 +273,13 @@ async function loadSettings() {
   const d = await r.json();
   document.getElementById('set-max-concurrency').value = d.max_concurrency || '10';
   document.getElementById('set-fission-count').value = d.fission_count || '5';
+  document.getElementById('set-browser-backend').value = d.browser_backend || 'rod';
+  document.getElementById('set-python-executable').value = d.python_executable || '';
+  updateBrowserBackend();
   document.getElementById('set-browser-visible').checked = d.headless === '0';
   updateBrowserModeLabel();
+  document.getElementById('set-at-auto-check').checked = d.at_auto_check !== '0';
+  updateATCheckModeLabel();
   document.getElementById('set-proxy-enabled').checked = d.proxy_enabled === '1';
   document.getElementById('set-proxy-list').value = d.proxy_list || '';
   document.getElementById('set-codex-auto-authorize').checked = d.codex_auto_authorize === '1';
@@ -274,14 +300,25 @@ async function loadSettings() {
   document.getElementById('set-sub2api-timeout').value = d.sub2api_timeout || '60';
   fillSub2APIGroups([], parseIDList(d.sub2api_group_ids));
   updateProxyCount();
+  syncSelect('set-browser-backend');
   syncSelect('set-sms-platform');
   syncSelect('set-sms-country');
   updateSMSCountryMode();
 }
 
+function updateBrowserBackend() {
+  const backend = document.getElementById('set-browser-backend').value;
+  document.getElementById('set-python-executable').disabled = backend === 'rod';
+}
+
 function updateBrowserModeLabel() {
   const visible = document.getElementById('set-browser-visible').checked;
   document.getElementById('browser-mode-label').textContent = visible ? '有头模式（显示 Chrome）' : '无头模式（后台运行）';
+}
+
+function updateATCheckModeLabel() {
+  const enabled = document.getElementById('set-at-auto-check').checked;
+  document.getElementById('at-check-mode-label').textContent = enabled ? '自动检测已开启' : '自动检测已关闭（仅手动）';
 }
 
 function updateSMSCountryMode() {
@@ -354,10 +391,14 @@ async function saveSettings() {
   const body = {
     max_concurrency: document.getElementById('set-max-concurrency').value.trim(),
     fission_count: document.getElementById('set-fission-count').value.trim(),
+    browser_backend: document.getElementById('set-browser-backend').value,
+    python_executable: document.getElementById('set-python-executable').value,
     headless: document.getElementById('set-browser-visible').checked ? '0' : '1',
+    at_auto_check: document.getElementById('set-at-auto-check').checked ? '1' : '0',
   };
   const r = await saveSettingBody(body);
-  if (!r.ok) return toast('保存失败', true);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '保存失败', true);
   toast('设置已保存');
 }
 

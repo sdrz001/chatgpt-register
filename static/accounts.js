@@ -18,25 +18,38 @@ const SUB2API_STATUS = {
   imported: '已导入',
   failed: '导入失败',
 };
+const AT_STATUS = {
+  unchecked: '待检测', checking: '检测中', valid: '有效', invalid: '失效', error: '检测失败', missing: '无 AT',
+};
+const PLAN_LABEL = {
+  free: 'Free', go: 'Go', plus: 'Plus', pro: 'Pro', team: 'Team', business: 'Business', enterprise: 'Enterprise', edu: 'Edu',
+};
 let page = 1;
 const size = 20;
 let accCache = {};
 let accTotal = 0;
+let accountCategories = [];
 const accSelected = new Set();
 
 async function load() {
   const q = document.getElementById('search').value.trim();
   const status = document.getElementById('filter-status').value;
+  const atStatus = document.getElementById('filter-at-status').value;
+  const plan = document.getElementById('filter-plan').value;
+  const category = document.getElementById('filter-account-category').value;
   const params = new URLSearchParams({ page, size });
   if (q) params.set('q', q);
   if (status) params.set('status', status);
+  if (atStatus) params.set('at_status', atStatus);
+  if (plan) params.set('plan_type', plan);
+  if (category) params.set('category_id', category);
   const r = await api('/api/registrations?' + params);
   const d = await r.json();
   accCache = {};
   accTotal = d.total || 0;
   (d.data || []).forEach(x => { accCache[x.id] = x; });
   document.getElementById('rows').innerHTML = (d.data || []).map(rowHtml).join('')
-    || '<tr><td colspan="8" style="text-align:center;color:var(--text-3)">暂无数据</td></tr>';
+    || '<tr><td colspan="10" style="text-align:center;color:var(--text-3)">暂无数据</td></tr>';
   const maxPage = Math.max(1, Math.ceil((d.total || 0) / size));
   renderPager('pager', page, maxPage, p => { page = p; load(); });
   syncBatchBar();
@@ -49,11 +62,16 @@ function rowHtml(x) {
   const canImportSub2API = x.status === 'registered' && x.codex_status === 'authorized' && x.sub2api_status !== 'importing';
   const codexTitle = x.codex_error ? esc(x.codex_error) : '';
   const sub2apiTitle = x.sub2api_error ? esc(x.sub2api_error) : (x.sub2api_account_id ? '远端账号 #' + x.sub2api_account_id : '');
+  const atStatus = x.status === 'registered' ? (x.at_status || 'unchecked') : 'missing';
+  const atTitle = [x.at_error, x.at_checked_at ? '最近检测：' + fmtTime(x.at_checked_at) : '', x.at_expires_at ? '到期：' + fmtTime(x.at_expires_at) : ''].filter(Boolean).join('\n');
+  const plan = String(x.plan_type || '').toLowerCase();
   return `
     <tr class="${accSelected.has(x.id) ? 'row-sel' : ''}">
       <td class="col-check"><input type="checkbox" ${accSelected.has(x.id) ? 'checked' : ''} onclick="toggleSelect(${x.id}, this.checked)"></td>
-      <td>${esc(x.email)}</td>
-      <td>${fmtTime(x.created_at)}</td>
+      <td><div class="account-email">${esc(x.email)}</div><div class="table-sub">${fmtTime(x.created_at)}</div></td>
+      <td>${x.category ? `<span class="category-chip">${esc(x.category.name)}</span>` : '<span class="table-muted">未分类</span>'}</td>
+      <td><span class="badge at-${esc(atStatus)}" title="${esc(atTitle)}">${AT_STATUS[atStatus] || esc(atStatus)}</span></td>
+      <td><span class="plan-badge plan-${esc(plan || 'unknown')}">${PLAN_LABEL[plan] || esc(plan || '未知')}</span></td>
       <td><span class="badge ${esc(x.status)}">${ACC_STATUS[x.status] || esc(x.status)}</span></td>
       <td><span class="badge ${esc(x.codex_status || 'pending')}" title="${codexTitle}">${CODEX_STATUS[x.codex_status] || '待授权'}</span></td>
       <td><span class="badge ${esc(x.sub2api_status || 'not_imported')}" title="${sub2apiTitle}">${SUB2API_STATUS[x.sub2api_status] || '未导入'}</span></td>
@@ -66,6 +84,9 @@ function rowHtml(x) {
         </button>
         <button class="icon-btn" title="复制 AT" ${canCopyAT ? '' : 'disabled'} onclick="copyAccAT(${x.id})">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+        <button class="icon-btn" title="检测 AT 与套餐" ${canCopyAT && atStatus !== 'checking' ? '' : 'disabled'} onclick="checkAT([${x.id}])">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 1-2.34-5.66"/><path d="M20 4v7h-7"/><path d="m9 12 2 2 4-4"/></svg>
         </button>
         <button class="icon-btn" title="${x.codex_status === 'authorized' ? '重新获取 Codex OAuth' : '获取 Codex OAuth'}" ${canAuthorizeCodex ? '' : 'disabled'} onclick="authorizeCodex(${x.id})">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15 8l3 3M18 5l3 3"/></svg>
@@ -81,6 +102,117 @@ function rowHtml(x) {
         </button>
       </td>
     </tr>`;
+}
+
+async function loadAccountCategories() {
+  const r = await api('/api/categories?scope=account');
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return;
+  accountCategories = d.data || [];
+  rebuildCategorySelect('filter-account-category', '全部分类', true);
+  rebuildCategorySelect('batch-account-category', '批量归类', true);
+  renderAccountCategories();
+}
+
+function rebuildCategorySelect(id, placeholder, includeUncategorized) {
+  const select = document.getElementById(id);
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = `<option value="">${esc(placeholder)}</option>` +
+    (includeUncategorized ? '<option value="uncategorized">未分类</option>' : '') +
+    accountCategories.map(category => `<option value="${category.id}">${esc(category.name)} (${category.item_count || 0})</option>`).join('');
+  if ([...select.options].some(option => option.value === current)) select.value = current;
+  if (select._rebuild) select._rebuild();
+}
+
+function openCategoryModal() {
+  document.getElementById('new-account-category').value = '';
+  document.getElementById('category-modal').style.display = 'flex';
+  loadAccountCategories();
+}
+
+function renderAccountCategories() {
+  const list = document.getElementById('account-category-list');
+  if (!list) return;
+  list.innerHTML = accountCategories.map(category => `
+    <div class="category-item">
+      <div><strong>${esc(category.name)}</strong><span>${Number(category.item_count || 0)} 个账户</span></div>
+      <div>
+        <button class="icon-btn" title="重命名" onclick="renameAccountCategory(${category.id})">改</button>
+        <button class="icon-btn danger" title="删除" onclick="deleteAccountCategory(${category.id})">删</button>
+      </div>
+    </div>`).join('') || '<div class="category-empty">暂无分类</div>';
+}
+
+async function createAccountCategory() {
+  const input = document.getElementById('new-account-category');
+  const name = input.value.trim();
+  if (!name) return toast('请输入分类名称', true);
+  const r = await api('/api/categories', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: 'account', name }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '新增分类失败', true);
+  input.value = '';
+  toast('分类已新增');
+  loadAccountCategories();
+}
+
+async function renameAccountCategory(id) {
+  const category = accountCategories.find(item => item.id === id);
+  if (!category) return;
+  const name = prompt('输入新的分类名称', category.name);
+  if (name == null || !name.trim() || name.trim() === category.name) return;
+  const r = await api('/api/categories/' + id, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '重命名失败', true);
+  toast('分类已重命名');
+  loadAccountCategories();
+  load();
+}
+
+async function deleteAccountCategory(id) {
+  const category = accountCategories.find(item => item.id === id);
+  if (!category || !confirm(`确定删除分类“${category.name}”？其中账户将变为未分类。`)) return;
+  const r = await api('/api/categories/' + id, { method: 'DELETE' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '删除分类失败', true);
+  toast('分类已删除');
+  loadAccountCategories();
+  load();
+}
+
+async function assignSelectedCategory(value) {
+  if (!value || !accSelected.size) return;
+  const categoryId = value === 'uncategorized' ? null : Number(value);
+  const r = await api('/api/categories/assign', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope: 'account', ids: [...accSelected], category_id: categoryId }),
+  });
+  const d = await r.json().catch(() => ({}));
+  document.getElementById('batch-account-category').value = '';
+  syncSelect('batch-account-category');
+  if (!r.ok) return toast(d.error || '批量归类失败', true);
+  toast('已更新 ' + accSelected.size + ' 个账户分类');
+  loadAccountCategories();
+  load();
+}
+
+async function checkAT(ids) {
+  if (!ids.length) return;
+  const r = await api('/api/registrations/at-check', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '启动 AT 检测失败', true);
+  toast('已开始检测 ' + Number(d.scheduled || 0) + ' 个 AT');
+  load();
+}
+
+function checkSelectedAT() {
+  return checkAT([...accSelected]);
 }
 
 /* ===== 生产进度 ===== */
@@ -344,8 +476,14 @@ async function del(id) {
 document.getElementById('search').addEventListener('keydown', e => {
   if (e.key === 'Enter') { page = 1; load(); }
 });
-document.getElementById('filter-status').addEventListener('change', () => { page = 1; load(); });
+['filter-status', 'filter-at-status', 'filter-plan', 'filter-account-category'].forEach(id => {
+  document.getElementById(id).addEventListener('change', () => { page = 1; load(); });
+});
+document.getElementById('new-account-category').addEventListener('keydown', event => {
+  if (event.key === 'Enter') createAccountCategory();
+});
 
+loadAccountCategories();
 load();
 loadProduce();
 loadBrowserGate();

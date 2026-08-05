@@ -4,6 +4,10 @@ adskull-register.exe
 chatgpt-register-local.exe
 .gomodcache/
 .gocache/
+.gotmp/
 .rod/
 *.log
 .playwright-mcp/
+.venv/
+.cloakbrowser-profiles/
+__pycache__/

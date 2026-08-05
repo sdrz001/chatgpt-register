@@ -2,6 +2,15 @@ package models
 
 import "time"
 
+type Category struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Scope     string    `gorm:"size:16;not null;uniqueIndex:idx_category_scope_name" json:"scope"`
+	Name      string    `gorm:"size:64;not null;uniqueIndex:idx_category_scope_name" json:"name"`
+	ItemCount int64     `gorm:"-" json:"item_count"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // Mailbox 邮箱管理
 //
 // Status 流转: unverified(待验证) / verifying(验证中) / verify_failed(验证失败) / verified(已验证)
@@ -14,6 +23,8 @@ type Mailbox struct {
 	RefreshToken      string    `gorm:"type:text" json:"refresh_token"`
 	CodeURL           string    `gorm:"type:text" json:"-"`
 	Status            string    `gorm:"size:32;default:unverified" json:"status"`
+	CategoryID        *uint     `gorm:"index" json:"category_id"`
+	Category          *Category `gorm:"constraint:OnUpdate:CASCADE,OnDelete:SET NULL;" json:"category,omitempty"`
 	Note              string    `gorm:"type:text" json:"note"`
 	CodeURLConfigured bool      `gorm:"-" json:"code_url_configured"`
 	RegisterCount     int       `gorm:"-" json:"register_count"`

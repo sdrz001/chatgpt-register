@@ -20,8 +20,16 @@ func TestInitMigratesIntegrationModels(t *testing.T) {
 	if !database.Migrator().HasTable(&models.SMSActivation{}) {
 		t.Fatal("sms_activations table missing")
 	}
+	if !database.Migrator().HasTable(&models.Category{}) {
+		t.Fatal("categories table missing")
+	}
 	for _, field := range []string{
 		"proxy",
+		"at_status",
+		"at_error",
+		"at_checked_at",
+		"at_expires_at",
+		"category_id",
 		"codex_status",
 		"codex_error",
 		"codex_authorized_at",
@@ -33,6 +41,9 @@ func TestInitMigratesIntegrationModels(t *testing.T) {
 		if !database.Migrator().HasColumn(&models.Registration{}, field) {
 			t.Fatalf("registrations.%s missing", field)
 		}
+	}
+	if !database.Migrator().HasColumn(&models.Mailbox{}, "category_id") {
+		t.Fatal("mailboxes.category_id missing")
 	}
 }
 

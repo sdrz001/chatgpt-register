@@ -67,6 +67,13 @@ func main() {
 		api.POST("/registrations/:id/sub2api-import", h.RegistrationSub2APIImport)
 		api.POST("/download", h.Download)
 		api.POST("/access-tokens", h.AccessTokens)
+		api.POST("/registrations/at-check", h.RegistrationATCheck)
+
+		api.GET("/categories", h.CategoryList)
+		api.POST("/categories", h.CategoryCreate)
+		api.PUT("/categories/:id", h.CategoryUpdate)
+		api.DELETE("/categories/:id", h.CategoryDelete)
+		api.POST("/categories/assign", h.CategoryAssign)
 
 		api.POST("/produce", h.Produce)
 		api.GET("/produce/status", h.ProduceStatus)

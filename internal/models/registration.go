@@ -25,7 +25,13 @@ type Registration struct {
 	AuthData          string     `gorm:"type:text" json:"auth_data,omitempty"` // 完整 auth.json
 	AccountID         string     `gorm:"size:255" json:"account_id"`
 	UserID            string     `gorm:"size:255" json:"user_id"`
-	PlanType          string     `gorm:"size:32" json:"plan_type"`
+	PlanType          string     `gorm:"size:64" json:"plan_type"`
+	ATStatus          string     `gorm:"column:at_status;size:16;not null;default:unchecked;index" json:"at_status"`
+	ATError           string     `gorm:"column:at_error;type:text" json:"at_error"`
+	ATCheckedAt       *time.Time `gorm:"column:at_checked_at" json:"at_checked_at"`
+	ATExpiresAt       *time.Time `gorm:"column:at_expires_at" json:"at_expires_at"`
+	CategoryID        *uint      `gorm:"index" json:"category_id"`
+	Category          *Category  `gorm:"constraint:OnUpdate:CASCADE,OnDelete:SET NULL;" json:"category,omitempty"`
 	CodexStatus       string     `gorm:"size:32;not null;default:pending" json:"codex_status"`
 	CodexError        string     `gorm:"type:text" json:"codex_error"`
 	CodexAuthorizedAt *time.Time `json:"codex_authorized_at"`

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>账户管理 · ChatGPT 注册管理</title>
-<link rel="stylesheet" href="/static/style.css?v=13">
+<link rel="stylesheet" href="/static/style.css?v=14">
 </head>
 <body data-page="accounts">
 <div class="layout">
@@ -28,18 +28,48 @@
     <div class="toolbar">
       <input id="search" class="px-input search" placeholder="搜索 email / 备注 ...">
       <select id="filter-status" class="px-input">
-        <option value="">全部状态</option>
+        <option value="">全部注册状态</option>
         <option value="registering">注册中</option>
         <option value="registered">已注册</option>
         <option value="register_failed">注册失败</option>
         <option value="already_registered">停用</option>
       </select>
+      <select id="filter-at-status" class="px-input">
+        <option value="">全部 AT 状态</option>
+        <option value="valid">AT 有效</option>
+        <option value="invalid">AT 失效</option>
+        <option value="unchecked">AT 待检测</option>
+        <option value="checking">AT 检测中</option>
+        <option value="error">AT 检测失败</option>
+        <option value="missing">无 AT</option>
+      </select>
+      <select id="filter-plan" class="px-input">
+        <option value="">全部套餐</option>
+        <option value="free">Free</option>
+        <option value="go">Go</option>
+        <option value="plus">Plus</option>
+        <option value="pro">Pro</option>
+        <option value="team">Team</option>
+        <option value="business">Business</option>
+        <option value="enterprise">Enterprise</option>
+        <option value="edu">Edu</option>
+      </select>
+      <select id="filter-account-category" class="px-input">
+        <option value="">全部分类</option>
+        <option value="uncategorized">未分类</option>
+      </select>
+      <button class="px-btn" onclick="openCategoryModal()">分类管理</button>
       <button class="px-btn primary" id="produce-btn" onclick="openProduceModal()">生产</button>
     </div>
 
     <div class="batch-bar" id="acc-batch" style="display:none">
       <span id="acc-batch-count">已选 0 项</span>
       <button class="px-btn primary" onclick="copySelectedAT()">复制 AT</button>
+      <button class="px-btn" onclick="checkSelectedAT()">检测 AT</button>
+      <select id="batch-account-category" class="px-input batch-select" onchange="assignSelectedCategory(this.value)">
+        <option value="">批量归类</option>
+        <option value="uncategorized">移出分类</option>
+      </select>
       <button class="px-btn" onclick="downloadSelected()">批量下载</button>
       <button class="px-btn danger" onclick="delSelected()">删除所选</button>
       <button class="px-btn ghost" onclick="clearSelection()">取消</button>
@@ -49,13 +79,28 @@
       <table class="px-table">
         <thead><tr>
           <th class="col-check"><input type="checkbox" id="acc-check-all" onclick="toggleSelectAll(this.checked)"></th>
-          <th>邮箱</th><th>创建时间</th><th>注册状态</th><th>Codex</th><th>Sub2API</th><th>出库状态</th><th>操作</th>
+          <th>邮箱</th><th>分类</th><th>AT 状态</th><th>套餐</th><th>注册状态</th><th>Codex</th><th>Sub2API</th><th>出库</th><th>操作</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
       <div class="pager" id="pager"></div>
     </div>
   </main>
+</div>
+
+<!-- 分类管理 modal -->
+<div class="modal-mask" id="category-modal" style="display:none">
+  <div class="modal px-panel" style="width:520px">
+    <h2>账户分类管理</h2>
+    <div class="category-create-row">
+      <input id="new-account-category" class="px-input" maxlength="64" placeholder="输入新分类名称">
+      <button class="px-btn primary" onclick="createAccountCategory()">新增</button>
+    </div>
+    <div id="account-category-list" class="category-list"></div>
+    <div class="modal-actions">
+      <button class="px-btn" onclick="closeModal('category-modal')">关闭</button>
+    </div>
+  </div>
 </div>
 
 <!-- 生产 modal -->
@@ -101,6 +146,6 @@
 
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js?v=2"></script>
-<script src="/static/accounts.js?v=13"></script>
+<script src="/static/accounts.js?v=14"></script>
 </body>
 </html>

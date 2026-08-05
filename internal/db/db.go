@@ -13,7 +13,7 @@ func Init(path string) (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := db.AutoMigrate(&models.Registration{}, &models.SMSActivation{}, &models.Mailbox{}, &models.Setting{}, &models.Admin{}); err != nil {
+	if err := db.AutoMigrate(&models.Category{}, &models.Registration{}, &models.SMSActivation{}, &models.Mailbox{}, &models.Setting{}, &models.Admin{}); err != nil {
 		return nil, err
 	}
 	normalizeLegacyStatuses(db)

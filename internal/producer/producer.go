@@ -45,10 +45,12 @@ var codeRe = regexp.MustCompile(`\b(\d{6})\b`)
 
 // Config 从系统设置装载的运行参数。
 type Config struct {
-	MaxConcurrency int
-	FissionCount   int
-	Headless       bool
-	Proxies        []string // 代理池，按账户轮转；空=直连
+	MaxConcurrency   int
+	FissionCount     int
+	Headless         bool
+	BrowserBackend   string
+	PythonExecutable string
+	Proxies          []string // 代理池，按账户轮转；空=直连
 }
 
 // Progress 生产进度快照，供 /api/produce/status 展示。
@@ -339,10 +341,12 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 		}
 	}
 	in := codexreg.Input{
-		Email:    email,
-		Password: password,
-		Proxy:    accountProxy,
-		Headless: cfg.Headless,
+		Email:            email,
+		Password:         password,
+		Proxy:            accountProxy,
+		Headless:         cfg.Headless,
+		Backend:          cfg.BrowserBackend,
+		PythonExecutable: cfg.PythonExecutable,
 		Log: func(f string, a ...any) {
 			msg := fmt.Sprintf(f, a...)
 			appendLog(msg)
@@ -369,11 +373,14 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 
 	appendLog("✓ 注册成功")
 	authBytes, _ := json.MarshalIndent(res.AuthJSON, "", "  ")
+	now := time.Now()
+	_, expiresAt, _ := codexreg.AccessTokenDetails(res.AccessToken)
 	p.upsert(models.Registration{
 		Email: email, MailboxID: mb.ID, Password: password, Proxy: accountProxy,
 		Status: "registered", IsMother: isMother, Note: note,
 		AuthData: string(authBytes), AccountID: res.AccountID,
-		UserID: res.UserID, PlanType: res.PlanType, Log: logBuf.String(),
+		UserID: res.UserID, PlanType: res.PlanType, ATStatus: "valid",
+		ATCheckedAt: &now, ATExpiresAt: expiresAt, Log: logBuf.String(),
 	})
 	values, configErr := integrationcfg.Load(p.db)
 	if configErr != nil {
@@ -546,10 +553,16 @@ func (p *Producer) registrationExists(email string) bool {
 // ---- DB / 设置 ----
 
 func (p *Producer) loadConfig() Config {
+	browserBackend := p.getSetting("browser_backend")
+	if browserBackend == "" {
+		browserBackend = codexreg.BackendRod
+	}
 	cfg := Config{
-		MaxConcurrency: atoiDefault(p.getSetting("max_concurrency"), defaultMaxConcurrency),
-		FissionCount:   atoiDefault(p.getSetting("fission_count"), defaultFissionCount),
-		Headless:       p.getSetting("headless") != "0", // 默认无头，仅当设置为 "0" 时才有头
+		MaxConcurrency:   atoiDefault(p.getSetting("max_concurrency"), defaultMaxConcurrency),
+		FissionCount:     atoiDefault(p.getSetting("fission_count"), defaultFissionCount),
+		Headless:         p.getSetting("headless") != "0", // 默认无头，仅当设置为 "0" 时才有头
+		BrowserBackend:   browserBackend,
+		PythonExecutable: p.getSetting("python_executable"),
 	}
 	if cfg.MaxConcurrency < 1 {
 		cfg.MaxConcurrency = 1
@@ -588,6 +601,10 @@ func (p *Producer) upsert(reg models.Registration) {
 			updates["account_id"] = reg.AccountID
 			updates["user_id"] = reg.UserID
 			updates["plan_type"] = reg.PlanType
+			updates["at_status"] = reg.ATStatus
+			updates["at_error"] = reg.ATError
+			updates["at_checked_at"] = reg.ATCheckedAt
+			updates["at_expires_at"] = reg.ATExpiresAt
 		}
 		if reg.Log != "" {
 			updates["log"] = reg.Log

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"chatgpt-register/internal/codexoauth"
+	"chatgpt-register/internal/codexreg"
 	"chatgpt-register/internal/integrationcfg"
 	"chatgpt-register/internal/models"
 	"chatgpt-register/internal/smsactivate"
@@ -295,6 +296,7 @@ func (p *Producer) saveCodexTokens(registration models.Registration, tokens code
 	authData["refresh_token"] = tokens.RefreshToken
 	authData["id_token"] = tokens.IDToken
 	authData["expires_in"] = tokens.ExpiresIn
+	planType := codexreg.NormalizePlanType(tokens.PlanType)
 	authData["expires_at"] = time.Now().UTC().Add(time.Duration(tokens.ExpiresIn) * time.Second).Format(time.RFC3339)
 	if tokens.ChatGPTAccountID != "" {
 		authData["account_id"] = tokens.ChatGPTAccountID
@@ -302,16 +304,18 @@ func (p *Producer) saveCodexTokens(registration models.Registration, tokens code
 	if tokens.ChatGPTUserID != "" {
 		authData["chatgpt_user_id"] = tokens.ChatGPTUserID
 	}
-	if tokens.PlanType != "" {
-		authData["plan_type"] = tokens.PlanType
+	if planType != "" {
+		authData["plan_type"] = planType
 	}
 	encoded, err := json.MarshalIndent(authData, "", "  ")
 	if err != nil {
 		return err
 	}
 	now := time.Now()
+	_, expiresAt, _ := codexreg.AccessTokenDetails(tokens.AccessToken)
 	updates := map[string]any{
 		"auth_data": string(encoded), "codex_status": "authorized", "codex_error": "", "codex_authorized_at": now,
+		"at_status": "valid", "at_error": "", "at_checked_at": now, "at_expires_at": expiresAt,
 	}
 	if tokens.ChatGPTAccountID != "" {
 		updates["account_id"] = tokens.ChatGPTAccountID
@@ -319,8 +323,8 @@ func (p *Producer) saveCodexTokens(registration models.Registration, tokens code
 	if tokens.ChatGPTUserID != "" {
 		updates["user_id"] = tokens.ChatGPTUserID
 	}
-	if tokens.PlanType != "" {
-		updates["plan_type"] = tokens.PlanType
+	if planType != "" {
+		updates["plan_type"] = planType
 	}
 	return p.db.Model(&models.Registration{}).Where("id = ?", registration.ID).Updates(updates).Error
 }

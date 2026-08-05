@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"chatgpt-register/internal/models"
 
@@ -17,13 +19,18 @@ import (
 func settingsTestHandler(t *testing.T) (*Handler, *gin.Engine) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	database, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "settings.db")), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.AutoMigrate(&models.Setting{}); err != nil {
+	if err := database.AutoMigrate(&models.Setting{}, &models.Category{}, &models.Registration{}); err != nil {
 		t.Fatal(err)
 	}
+	sqlDB, err := database.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	h := &Handler{DB: database}
 	r := gin.New()
 	r.GET("/settings", h.SettingsGet)
@@ -69,6 +76,213 @@ func putSettings(r *gin.Engine, body string) *httptest.ResponseRecorder {
 	request.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(response, request)
 	return response
+}
+
+func TestSettingsDefaultBrowserBackendIsRod(t *testing.T) {
+	for name, seedEmpty := range map[string]bool{"missing": false, "empty": true} {
+		t.Run(name, func(t *testing.T) {
+			handler, router := settingsTestHandler(t)
+			if seedEmpty {
+				if err := handler.DB.Create(&models.Setting{Key: "browser_backend", Value: ""}).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/settings", nil))
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			var body map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body["browser_backend"] != "rod" {
+				t.Fatalf("browser_backend=%q", body["browser_backend"])
+			}
+		})
+	}
+}
+
+func TestSettingsSaveBrowserBackend(t *testing.T) {
+	handler, router := settingsTestHandler(t)
+	response := putSettings(router, `{"browser_backend":"cloakbrowser","python_executable":"C:\\Python\\python.exe"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	for key, want := range map[string]string{
+		"browser_backend":   "cloakbrowser",
+		"python_executable": `C:\Python\python.exe`,
+	} {
+		var setting models.Setting
+		if err := handler.DB.First(&setting, "key = ?", key).Error; err != nil {
+			t.Fatal(err)
+		}
+		if setting.Value != want {
+			t.Fatalf("%s=%q want %q", key, setting.Value, want)
+		}
+	}
+}
+
+func TestSettingsRejectInvalidBrowserBackendAtomically(t *testing.T) {
+	handler, router := settingsTestHandler(t)
+	response := putSettings(router, `{"max_concurrency":"20","browser_backend":"other"}`)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "browser_backend") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var count int64
+	if err := handler.DB.Model(&models.Setting{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("partial settings persisted: count=%d error=%v", count, err)
+	}
+}
+
+func TestSettingsRejectInvalidPythonExecutableAtomically(t *testing.T) {
+	for name, value := range map[string]string{
+		"cr":       "python\r.exe",
+		"lf":       "python\n.exe",
+		"nul":      "python\x00.exe",
+		"too long": strings.Repeat("p", 1025),
+	} {
+		t.Run(name, func(t *testing.T) {
+			handler, router := settingsTestHandler(t)
+			body, err := json.Marshal(map[string]string{"max_concurrency": "20", "python_executable": value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := putSettings(router, string(body))
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "python_executable") {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			var count int64
+			if err := handler.DB.Model(&models.Setting{}).Count(&count).Error; err != nil || count != 0 {
+				t.Fatalf("partial settings persisted: count=%d error=%v", count, err)
+			}
+		})
+	}
+}
+
+func TestSettingsDefaultATAutoCheckIsEnabled(t *testing.T) {
+	_, router := settingsTestHandler(t)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/settings", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["at_auto_check"] != "1" {
+		t.Fatalf("at_auto_check=%q", body["at_auto_check"])
+	}
+}
+
+func TestSettingsDisableAutoATCheckKeepsManualCheckAvailable(t *testing.T) {
+	handler, router := settingsTestHandler(t)
+	handler.setAutoATCheck(true)
+	token := registrationTestJWT(t, "free", time.Now().Add(time.Hour))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accounts":{"account-id":{"account":{"plan_type":"plus"}}}}`))
+	}))
+	defer server.Close()
+	handler.ATCheckURL = server.URL
+	handler.ATCheckClient = func(string) (*http.Client, error) { return server.Client(), nil }
+	registration := models.Registration{
+		Email: "manual-check@example.test", Status: "registered", ATStatus: "unchecked",
+		AccountID: "account-id", AuthData: `{"access_token":"` + token + `"}`,
+	}
+	if err := handler.DB.Create(&registration).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	response := putSettings(router, `{"at_auto_check":"0"}`)
+	if response.Code != http.StatusOK || handler.autoATCheck.Load() {
+		t.Fatalf("status=%d enabled=%v body=%s", response.Code, handler.autoATCheck.Load(), response.Body.String())
+	}
+	if handler.scheduleATCheck(registration, false) {
+		t.Fatal("automatic check scheduled while disabled")
+	}
+	if !handler.scheduleATCheck(registration, true) {
+		t.Fatal("manual check was not scheduled")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := handler.DB.First(&registration, registration.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		if registration.ATStatus == "valid" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if registration.ATStatus != "valid" || registration.PlanType != "plus" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	var setting models.Setting
+	if err := handler.DB.First(&setting, "key = ?", "at_auto_check").Error; err != nil || setting.Value != "0" {
+		t.Fatalf("setting=%+v error=%v", setting, err)
+	}
+}
+
+func TestSettingsDisableAutoATCheckCancelsActiveAutomaticCheck(t *testing.T) {
+	handler, _ := settingsTestHandler(t)
+	token := registrationTestJWT(t, "free", time.Now().Add(time.Hour))
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(started)
+		<-request.Context().Done()
+		close(canceled)
+	}))
+	defer server.Close()
+	handler.ATCheckURL = server.URL
+	handler.ATCheckClient = func(string) (*http.Client, error) { return server.Client(), nil }
+	handler.autoATCheck.Store(true)
+	registration := models.Registration{
+		Email: "cancel-auto@example.test", Status: "registered", ATStatus: "valid",
+		AuthData: `{"access_token":"` + token + `"}`,
+	}
+	if err := handler.DB.Create(&registration).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !handler.scheduleATCheck(registration, false) {
+		t.Fatal("automatic check was not scheduled")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("automatic request did not start")
+	}
+	handler.setAutoATCheck(false)
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("automatic request was not canceled")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if err := handler.DB.First(&registration, registration.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		if registration.ATStatus == "valid" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("status=%q", registration.ATStatus)
+}
+
+func TestSettingsRejectInvalidATAutoCheckWithoutChangingRuntime(t *testing.T) {
+	handler, router := settingsTestHandler(t)
+	handler.setAutoATCheck(true)
+	response := putSettings(router, `{"at_auto_check":"yes"}`)
+	if response.Code != http.StatusBadRequest || !handler.autoATCheck.Load() {
+		t.Fatalf("status=%d enabled=%v body=%s", response.Code, handler.autoATCheck.Load(), response.Body.String())
+	}
+	var count int64
+	if err := handler.DB.Model(&models.Setting{}).Where("key = ?", "at_auto_check").Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("count=%d error=%v", count, err)
+	}
 }
 
 func TestSettingsValidationIsAtomic(t *testing.T) {

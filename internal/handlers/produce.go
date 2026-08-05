@@ -103,8 +103,13 @@ func (h *Handler) Produce(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if h.Browser == nil || !h.Browser.Ready() {
-		c.JSON(http.StatusConflict, gin.H{"error": "缺少浏览器，无法生产：浏览器正在下载或下载失败"})
+	browserStatus := h.checkBrowserBackend(c.Request.Context())
+	if !browserStatus.Ready {
+		message := browserStatus.Message
+		if browserStatus.Error != "" {
+			message += "：" + browserStatus.Error
+		}
+		c.JSON(http.StatusConflict, gin.H{"error": message})
 		return
 	}
 	if err := h.Producer.Start(in.Count); err != nil {
@@ -119,13 +124,9 @@ func (h *Handler) ProduceStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, h.Producer.Snapshot())
 }
 
-// BrowserStatus 返回 rod 浏览器的下载/就绪状态，供仪表盘展示进度。
+// BrowserStatus 返回当前所选浏览器后端的就绪状态。
 func (h *Handler) BrowserStatus(c *gin.Context) {
-	if h.Browser == nil {
-		c.JSON(http.StatusOK, gin.H{"ready": true, "phase": "ready"})
-		return
-	}
-	c.JSON(http.StatusOK, h.Browser.Snapshot())
+	c.JSON(http.StatusOK, h.checkBrowserBackend(c.Request.Context()))
 }
 
 // ProduceStop 停止生产。

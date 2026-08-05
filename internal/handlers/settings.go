@@ -27,7 +27,8 @@ var secretSettingKeys = map[string]string{
 }
 
 var allowedSettingKeys = map[string]bool{
-	"max_concurrency": true, "fission_count": true, "headless": true,
+	"max_concurrency": true, "fission_count": true, "headless": true, "at_auto_check": true,
+	"browser_backend": true, "python_executable": true,
 	"proxy_enabled": true, "proxy_list": true,
 	"codex_auto_authorize": true, "sms_platform": true, "sms_api_key": true,
 	"sms_country": true, "sms_random_countries": true, "sms_max_price": true, "sms_timeout": true, "sms_phone_attempts": true,
@@ -61,6 +62,12 @@ func (h *Handler) SettingsGet(c *gin.Context) {
 			out[configuredKey] = "0"
 		}
 	}
+	if _, exists := out["at_auto_check"]; !exists {
+		out["at_auto_check"] = "1"
+	}
+	if strings.TrimSpace(out["browser_backend"]) == "" {
+		out["browser_backend"] = "rod"
+	}
 	c.JSON(http.StatusOK, out)
 }
 
@@ -80,7 +87,9 @@ func (h *Handler) SettingsSave(c *gin.Context) {
 		if reservedSettingKeys[key] || !allowedSettingKeys[key] {
 			continue
 		}
-		value = strings.TrimSpace(value)
+		if key != "python_executable" {
+			value = strings.TrimSpace(value)
+		}
 		if _, secret := secretSettingKeys[key]; secret && value == "" {
 			continue
 		}
@@ -105,13 +114,27 @@ func (h *Handler) SettingsSave(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	if value, changed := updates["at_auto_check"]; changed {
+		h.setAutoATCheck(value == "1")
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func validateSettings(values integrationcfg.Values, updates map[string]string) error {
-	for _, key := range []string{"headless", "proxy_enabled", "codex_auto_authorize", "sub2api_auto_import"} {
+	for _, key := range []string{"headless", "proxy_enabled", "at_auto_check", "codex_auto_authorize", "sub2api_auto_import"} {
 		if value, changed := updates[key]; changed && value != "0" && value != "1" {
 			return fmt.Errorf("%s 必须是 0 或 1", key)
+		}
+	}
+	if backend, changed := updates["browser_backend"]; changed && backend != "rod" && backend != "cloakbrowser" {
+		return fmt.Errorf("browser_backend 必须是 rod 或 cloakbrowser")
+	}
+	if python, changed := updates["python_executable"]; changed {
+		if len(python) > 1024 {
+			return fmt.Errorf("python_executable 最长 1024 个字符")
+		}
+		if strings.ContainsAny(python, "\r\n\x00") {
+			return fmt.Errorf("python_executable 不得包含 CR、LF 或 NUL")
 		}
 	}
 	for _, setting := range []struct {

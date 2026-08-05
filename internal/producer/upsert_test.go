@@ -22,6 +22,41 @@ func TestMailAccountIncludesCodeURL(t *testing.T) {
 	}
 }
 
+func TestLoadConfigDefaultsBrowserBackendToRod(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Setting{}); err != nil {
+		t.Fatal(err)
+	}
+	config := (&Producer{db: database}).loadConfig()
+	if config.BrowserBackend != "rod" || config.PythonExecutable != "" {
+		t.Fatalf("config=%+v", config)
+	}
+}
+
+func TestLoadConfigReadsCloakBrowserSettings(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Setting{}); err != nil {
+		t.Fatal(err)
+	}
+	settings := []models.Setting{
+		{Key: "browser_backend", Value: "cloakbrowser"},
+		{Key: "python_executable", Value: `C:\Python\python.exe`},
+	}
+	if err := database.Create(&settings).Error; err != nil {
+		t.Fatal(err)
+	}
+	config := (&Producer{db: database}).loadConfig()
+	if config.BrowserBackend != "cloakbrowser" || config.PythonExecutable != `C:\Python\python.exe` {
+		t.Fatalf("config=%+v", config)
+	}
+}
+
 func TestZeroFissionCountOnlyClaimsMotherAccount(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -32,6 +33,40 @@ func normalizeProxy(raw string) string {
 	default:
 		return "http://" + raw
 	}
+}
+
+func newProxyHTTPClient(rawProxy string, timeout time.Duration) (*http.Client, error) {
+	transport := &http.Transport{}
+	proxyURL := normalizeProxy(rawProxy)
+	if proxyURL == "" {
+		return &http.Client{Transport: transport, Timeout: timeout}, nil
+	}
+	u, err := url.Parse(proxyURL)
+	if err != nil || u.Host == "" {
+		return nil, fmt.Errorf("代理格式错误")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		transport.Proxy = http.ProxyURL(u)
+	case "socks5", "socks5h":
+		var auth *proxy.Auth
+		if u.User != nil {
+			password, _ := u.User.Password()
+			auth = &proxy.Auth{User: u.User.Username(), Password: password}
+		}
+		dialer, err := proxy.SOCKS5("tcp", u.Host, auth, proxy.Direct)
+		if err != nil {
+			return nil, err
+		}
+		if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
+			transport.DialContext = contextDialer.DialContext
+		} else {
+			transport.Dial = dialer.Dial
+		}
+	default:
+		return nil, fmt.Errorf("不支持的代理类型: %s", u.Scheme)
+	}
+	return &http.Client{Transport: transport, Timeout: timeout}, nil
 }
 
 // ProxyTest 通过给定代理请求一个 IP 探测服务，返回出口 IP，用于验证代理可用。

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -22,13 +23,15 @@ func mailboxTestHandler(t *testing.T) (*Handler, *gin.Engine) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.AutoMigrate(&models.Mailbox{}, &models.Registration{}, &models.Setting{}); err != nil {
+	if err := database.AutoMigrate(&models.Category{}, &models.Mailbox{}, &models.Registration{}, &models.Setting{}); err != nil {
 		t.Fatal(err)
 	}
 	handler := &Handler{DB: database, Mail: mailfetch.New()}
 	router := gin.New()
 	router.POST("/mailboxes/import", handler.MailboxImport)
 	router.GET("/mailboxes", handler.MailboxList)
+	router.POST("/categories", handler.CategoryCreate)
+	router.POST("/categories/assign", handler.CategoryAssign)
 	return handler, router
 }
 
@@ -74,6 +77,39 @@ func TestMailboxImportAPICodeURLIsWriteOnly(t *testing.T) {
 	}
 	if len(list.Data) != 1 || !list.Data[0].CodeURLConfigured {
 		t.Fatalf("list=%+v", list.Data)
+	}
+}
+
+func TestMailboxCategoryAssignFilterAndClear(t *testing.T) {
+	handler, router := mailboxTestHandler(t)
+	mailbox := models.Mailbox{Email: "classified@example.test", Status: "verified"}
+	if err := handler.DB.Create(&mailbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	category := models.Category{Scope: "mailbox", Name: "主力邮箱"}
+	if err := handler.DB.Create(&category).Error; err != nil {
+		t.Fatal(err)
+	}
+	assign := func(categoryJSON string) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/categories/assign", strings.NewReader(`{"scope":"mailbox","ids":[`+strconv.FormatUint(uint64(mailbox.ID), 10)+`],"category_id":`+categoryJSON+`}`))
+		request.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(response, request)
+		return response
+	}
+	if response := assign(strconv.FormatUint(uint64(category.ID), 10)); response.Code != http.StatusOK {
+		t.Fatalf("assign status=%d body=%s", response.Code, response.Body.String())
+	}
+	list := httptest.NewRecorder()
+	router.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/mailboxes?category_id="+strconv.FormatUint(uint64(category.ID), 10), nil))
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), "主力邮箱") || !strings.Contains(list.Body.String(), "classified@example.test") {
+		t.Fatalf("list status=%d body=%s", list.Code, list.Body.String())
+	}
+	if response := assign("null"); response.Code != http.StatusOK {
+		t.Fatalf("clear status=%d body=%s", response.Code, response.Body.String())
+	}
+	if err := handler.DB.First(&mailbox, mailbox.ID).Error; err != nil || mailbox.CategoryID != nil {
+		t.Fatalf("mailbox=%+v error=%v", mailbox, err)
 	}
 }
 

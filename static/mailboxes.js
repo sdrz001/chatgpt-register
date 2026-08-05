@@ -2,6 +2,7 @@
 let mbPage = 1;
 const size = 20;
 let mbCache = {};
+let mailboxCategories = [];
 
 const MB_STATUS = {
   unverified: '待验证',
@@ -19,9 +20,11 @@ async function loadMailboxes() {
   try {
     const q = document.getElementById('mb-search').value.trim();
     const status = document.getElementById('mb-filter').value;
+    const category = document.getElementById('mb-category-filter').value;
     const params = new URLSearchParams({ page: mbPage, size });
     if (q) params.set('q', q);
     if (status) params.set('status', status);
+    if (category) params.set('category_id', category);
     const r = await api('/api/mailboxes?' + params);
     const d = await r.json();
     mbCache = {};
@@ -30,10 +33,14 @@ async function loadMailboxes() {
       <tr class="${mbSelected.has(x.id) ? 'row-sel' : ''}">
         <td class="col-check"><input type="checkbox" ${mbSelected.has(x.id) ? 'checked' : ''} onclick="toggleSelect(${x.id}, this.checked)"></td>
         <td>${esc(x.email)}</td>
+        <td>${x.category ? `<span class="category-chip">${esc(x.category.name)}</span>` : '<span class="table-muted">未分类</span>'}</td>
         <td>${Number(x.register_count || 0)} / ${Number(x.register_limit || 0)}</td>
         <td>${fmtTime(x.created_at)}</td>
         <td><span class="badge ${esc(x.status)}">${MB_STATUS[x.status] || esc(x.status)}</span></td>
         <td>
+          <button class="icon-btn" title="编辑邮箱与分类" onclick="editMailbox(${x.id})">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/></svg>
+          </button>
           ${x.status === 'verified' ? `<button class="icon-btn" title="取件" onclick="openMailModal(${x.id})">
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
           </button>` : ''}
@@ -48,6 +55,103 @@ async function loadMailboxes() {
   } finally {
     mbLoading = false;
   }
+}
+
+async function loadMailboxCategories() {
+  const r = await api('/api/categories?scope=mailbox');
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return;
+  mailboxCategories = d.data || [];
+  rebuildMailboxCategorySelect('mb-category-filter', '全部分类', true);
+  rebuildMailboxCategorySelect('batch-mailbox-category', '批量归类', true);
+  rebuildMailboxCategorySelect('mb-category', '未分类', false);
+  renderMailboxCategories();
+}
+
+function rebuildMailboxCategorySelect(id, placeholder, includeUncategorized) {
+  const select = document.getElementById(id);
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = `<option value="">${esc(placeholder)}</option>` +
+    (includeUncategorized ? '<option value="uncategorized">未分类</option>' : '') +
+    mailboxCategories.map(category => `<option value="${category.id}">${esc(category.name)} (${category.item_count || 0})</option>`).join('');
+  if ([...select.options].some(option => option.value === current)) select.value = current;
+  if (select._rebuild) select._rebuild();
+}
+
+function openMailboxCategoryModal() {
+  document.getElementById('new-mailbox-category').value = '';
+  document.getElementById('mailbox-category-modal').style.display = 'flex';
+  loadMailboxCategories();
+}
+
+function renderMailboxCategories() {
+  const list = document.getElementById('mailbox-category-list');
+  if (!list) return;
+  list.innerHTML = mailboxCategories.map(category => `
+    <div class="category-item">
+      <div><strong>${esc(category.name)}</strong><span>${Number(category.item_count || 0)} 个邮箱</span></div>
+      <div>
+        <button class="icon-btn" title="重命名" onclick="renameMailboxCategory(${category.id})">改</button>
+        <button class="icon-btn danger" title="删除" onclick="deleteMailboxCategory(${category.id})">删</button>
+      </div>
+    </div>`).join('') || '<div class="category-empty">暂无分类</div>';
+}
+
+async function createMailboxCategory() {
+  const input = document.getElementById('new-mailbox-category');
+  const name = input.value.trim();
+  if (!name) return toast('请输入分类名称', true);
+  const r = await api('/api/categories', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: 'mailbox', name }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '新增分类失败', true);
+  input.value = '';
+  toast('分类已新增');
+  loadMailboxCategories();
+}
+
+async function renameMailboxCategory(id) {
+  const category = mailboxCategories.find(item => item.id === id);
+  if (!category) return;
+  const name = prompt('输入新的分类名称', category.name);
+  if (name == null || !name.trim() || name.trim() === category.name) return;
+  const r = await api('/api/categories/' + id, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '重命名失败', true);
+  toast('分类已重命名');
+  loadMailboxCategories();
+  loadMailboxes();
+}
+
+async function deleteMailboxCategory(id) {
+  const category = mailboxCategories.find(item => item.id === id);
+  if (!category || !confirm(`确定删除分类“${category.name}”？其中邮箱将变为未分类。`)) return;
+  const r = await api('/api/categories/' + id, { method: 'DELETE' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '删除分类失败', true);
+  toast('分类已删除');
+  loadMailboxCategories();
+  loadMailboxes();
+}
+
+async function assignSelectedMailboxCategory(value) {
+  if (!value || !mbSelected.size) return;
+  const categoryId = value === 'uncategorized' ? null : Number(value);
+  const r = await api('/api/categories/assign', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope: 'mailbox', ids: [...mbSelected], category_id: categoryId }),
+  });
+  const d = await r.json().catch(() => ({}));
+  document.getElementById('batch-mailbox-category').value = '';
+  syncSelect('batch-mailbox-category');
+  if (!r.ok) return toast(d.error || '批量归类失败', true);
+  toast('已更新 ' + mbSelected.size + ' 个邮箱分类');
+  loadMailboxCategories();
+  loadMailboxes();
 }
 
 /* ===== 多选 ===== */
@@ -227,6 +331,8 @@ function openMailboxModal(data) {
   const codeURL = document.getElementById('mb-code-url');
   codeURL.value = '';
   codeURL.placeholder = data && data.code_url_configured ? '已配置；留空保持不变' : '输入 http/https 取码 API 地址';
+  document.getElementById('mb-category').value = data && data.category_id ? String(data.category_id) : '';
+  syncSelect('mb-category');
   document.getElementById('mb-status').value = data ? data.status : 'unverified';
   syncSelect('mb-status');
   document.getElementById('mb-note').value = data ? data.note : '';
@@ -247,6 +353,7 @@ async function saveMailbox() {
     refresh_token: document.getElementById('mb-refresh-token').value.trim(),
     code_url: document.getElementById('mb-code-url').value.trim(),
     status: document.getElementById('mb-status').value,
+    category_id: document.getElementById('mb-category').value ? Number(document.getElementById('mb-category').value) : null,
     note: document.getElementById('mb-note').value,
   };
   if (!body.email) return toast('email 必填', true);
@@ -443,11 +550,17 @@ let mbTimer = setInterval(() => {
 document.getElementById('mb-search').addEventListener('keydown', e => {
   if (e.key === 'Enter') { mbPage = 1; loadMailboxes(); }
 });
-document.getElementById('mb-filter').addEventListener('change', () => { mbPage = 1; loadMailboxes(); });
+['mb-filter', 'mb-category-filter'].forEach(id => {
+  document.getElementById(id).addEventListener('change', () => { mbPage = 1; loadMailboxes(); });
+});
+document.getElementById('new-mailbox-category').addEventListener('keydown', event => {
+  if (event.key === 'Enter') createMailboxCategory();
+});
 
 /* 点遮罩关闭取件弹窗时也要停轮询 */
 document.getElementById('mail-modal').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeMailModal();
 });
 
+loadMailboxCategories();
 loadMailboxes();

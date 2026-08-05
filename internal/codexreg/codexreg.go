@@ -12,19 +12,30 @@ package codexreg
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 )
 
-const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+const (
+	userAgent           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+	BackendRod          = "rod"
+	BackendCloakBrowser = "cloakbrowser"
+)
+
+var browserRegister = registerBrowser
 
 // Input 单个账号的生产参数。
 type Input struct {
-	Email    string
-	Password string // 注册流程要求创建密码时使用（为空则自动生成）
-	FullName string
-	Age      string
-	Proxy    string // 空=直连
-	Headless bool
+	Email            string
+	Password         string // 注册流程要求创建密码时使用（为空则自动生成）
+	FullName         string
+	Age              string
+	Proxy            string // 空=直连
+	Headless         bool
+	Backend          string
+	PythonExecutable string
+	SidecarScript    string
 
 	// FetchCode 拉取 ChatGPT 发到邮箱的验证码。由 producer 用 mailfetch 实现。
 	FetchCode func(ctx context.Context) (string, error)
@@ -47,13 +58,53 @@ type Result struct {
 
 func (in Input) logf(format string, a ...any) {
 	if in.Log != nil {
-		in.Log(format, a...)
+		in.Log("%s", redactSensitive(fmt.Sprintf(format, a...), in, "", ""))
+	}
+}
+
+type registrationError struct {
+	message string
+	cause   error
+}
+
+func (e *registrationError) Error() string { return e.message }
+func (e *registrationError) Unwrap() error {
+	for _, target := range []error{ErrAccountTaken, context.Canceled, context.DeadlineExceeded} {
+		if errors.Is(e.cause, target) {
+			return target
+		}
+	}
+	return nil
+}
+
+func sanitizedError(prefix string, err error, in Input) error {
+	return &registrationError{
+		message: prefix + redactSensitive(err.Error(), in, "", ""),
+		cause:   err,
+	}
+}
+
+func normalizeBackend(backend string) (string, error) {
+	backend = strings.ToLower(strings.TrimSpace(backend))
+	if backend == "" {
+		return BackendRod, nil
+	}
+	switch backend {
+	case BackendRod, BackendCloakBrowser:
+		return backend, nil
+	default:
+		return "", fmt.Errorf("不支持的浏览器后端 %q", backend)
 	}
 }
 
 // Register 完整生产一个账号：浏览器注册 ChatGPT → 取 accessToken → 组装 auth.json。
 // 拿到 AT 即成功；不再调用已失效的 Agent Identity 注册接口。
 func Register(ctx context.Context, in Input) (*Result, error) {
+	backend, err := normalizeBackend(in.Backend)
+	if err != nil {
+		return nil, err
+	}
+	in.Backend = backend
 	if in.FetchCode == nil {
 		return nil, fmt.Errorf("缺少 FetchCode 回调，无法自动读取验证码")
 	}
@@ -67,14 +118,19 @@ func Register(ctx context.Context, in Input) (*Result, error) {
 		in.Password = GenPassword(16)
 	}
 
-	accessToken, err := registerBrowser(ctx, in)
+	var accessToken string
+	if backend == BackendCloakBrowser {
+		accessToken, err = registerSidecar(ctx, in)
+	} else {
+		accessToken, err = browserRegister(ctx, in)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("ChatGPT 注册失败: %w", err)
+		return nil, sanitizedError("ChatGPT 注册失败: ", err, in)
 	}
 
 	auth, accountID, userID, planType, err := buildAuthFromToken(in, accessToken)
 	if err != nil {
-		return nil, err
+		return nil, sanitizedError("", err, in)
 	}
 
 	return &Result{

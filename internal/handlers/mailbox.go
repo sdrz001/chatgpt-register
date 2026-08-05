@@ -21,6 +21,7 @@ type mailboxInput struct {
 	RefreshToken string `json:"refresh_token"`
 	CodeURL      string `json:"code_url"`
 	Status       string `json:"status"`
+	CategoryID   *uint  `json:"category_id"`
 	Note         string `json:"note"`
 }
 
@@ -48,6 +49,13 @@ func (h *Handler) MailboxList(c *gin.Context) {
 	if s := c.Query("status"); s != "" {
 		q = q.Where("status = ?", s)
 	}
+	if s := c.Query("category_id"); s != "" {
+		if s == "uncategorized" {
+			q = q.Where("category_id IS NULL")
+		} else if categoryID, err := strconv.ParseUint(s, 10, 64); err == nil {
+			q = q.Where("category_id = ?", categoryID)
+		}
+	}
 	if kw := c.Query("q"); kw != "" {
 		like := "%" + kw + "%"
 		q = q.Where("email LIKE ? OR provider LIKE ? OR note LIKE ?", like, like, like)
@@ -62,7 +70,7 @@ func (h *Handler) MailboxList(c *gin.Context) {
 	}
 	var total int64
 	q.Model(&models.Mailbox{}).Count(&total)
-	if err := q.Offset((page - 1) * size).Limit(size).Find(&items).Error; err != nil {
+	if err := q.Preload("Category").Offset((page - 1) * size).Limit(size).Find(&items).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -107,6 +115,10 @@ func (h *Handler) MailboxCreate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status"})
 		return
 	}
+	if !h.categoryExists("mailbox", in.CategoryID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "邮箱分类不存在"})
+		return
+	}
 	codeURL := strings.TrimSpace(in.CodeURL)
 	if codeURL != "" {
 		if err := mailfetch.ValidateCodeURL(codeURL); err != nil {
@@ -117,7 +129,7 @@ func (h *Handler) MailboxCreate(c *gin.Context) {
 	m := models.Mailbox{
 		Email: strings.TrimSpace(in.Email), Password: in.Password, Provider: strings.TrimSpace(in.Provider),
 		ClientID: strings.TrimSpace(in.ClientID), RefreshToken: strings.TrimSpace(in.RefreshToken), CodeURL: codeURL,
-		Status: in.Status, Note: in.Note,
+		Status: in.Status, CategoryID: in.CategoryID, Note: in.Note,
 	}
 	if codeURL != "" {
 		m.Provider = "api"
@@ -224,6 +236,10 @@ func (h *Handler) MailboxUpdate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status"})
 		return
 	}
+	if !h.categoryExists("mailbox", in.CategoryID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "邮箱分类不存在"})
+		return
+	}
 	m.Email = strings.TrimSpace(in.Email)
 	m.Password = in.Password
 	m.Provider = strings.TrimSpace(in.Provider)
@@ -241,6 +257,7 @@ func (h *Handler) MailboxUpdate(c *gin.Context) {
 	if in.Status != "" {
 		m.Status = in.Status
 	}
+	m.CategoryID = in.CategoryID
 	m.Note = in.Note
 	if err := h.DB.Save(&m).Error; err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})

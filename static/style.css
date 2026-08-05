@@ -456,6 +456,38 @@ select.px-input option { background: #fff; }
 .badge.authorized, .badge.imported { color: var(--green); background: rgba(22, 163, 74, .13); }
 .badge.not_imported { color: var(--text-3); background: rgba(120, 130, 160, .12); }
 .badge.failed { color: var(--red); background: rgba(225, 29, 72, .12); }
+.badge.at-valid { color: var(--green); background: rgba(22, 163, 74, .13); }
+.badge.at-invalid, .badge.at-missing { color: var(--red); background: rgba(225, 29, 72, .12); }
+.badge.at-checking { color: var(--cyan); background: rgba(8, 145, 178, .13); }
+.badge.at-error { color: var(--amber); background: rgba(217, 119, 6, .13); }
+.badge.at-unchecked { color: var(--text-3); background: rgba(120, 130, 160, .12); }
+
+.plan-badge, .category-chip {
+  display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+.plan-badge { color: #596780; background: #eef2f7; }
+.plan-plus { color: #6d28d9; background: rgba(124, 58, 237, .12); }
+.plan-pro { color: #a21caf; background: rgba(192, 38, 211, .12); }
+.plan-team, .plan-business { color: #0369a1; background: rgba(2, 132, 199, .12); }
+.plan-enterprise, .plan-edu { color: #9a3412; background: rgba(234, 88, 12, .12); }
+.plan-go { color: #047857; background: rgba(5, 150, 105, .12); }
+.category-chip { color: var(--primary); background: var(--primary-soft); }
+.table-muted, .table-sub { color: var(--text-3); font-size: 12px; }
+.account-email { color: var(--text-2); white-space: nowrap; }
+.table-sub { margin-top: 3px; white-space: nowrap; }
+
+.category-create-row { display: flex; gap: 10px; margin-bottom: 16px; }
+.category-create-row .px-input { flex: 1; }
+.category-list { border: 1px solid #edf1f7; border-radius: 10px; overflow: hidden; }
+.category-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; border-bottom: 1px solid #edf1f7; }
+.category-item:last-child { border-bottom: 0; }
+.category-item > div:first-child { display: flex; flex-direction: column; gap: 3px; }
+.category-item strong { color: var(--text-2); font-size: 13.5px; }
+.category-item span, .category-empty { color: var(--text-3); font-size: 12px; }
+.category-empty { padding: 24px; text-align: center; }
+.batch-bar .px-select { min-width: 145px; }
+.batch-bar .px-select-btn { height: 32px; background: #fff; }
 
 /* ===== 生产进度条 ===== */
 .produce-bar {

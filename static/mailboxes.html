@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>邮箱管理 · ChatGPT 注册管理</title>
-<link rel="stylesheet" href="/static/style.css?v=8">
+<link rel="stylesheet" href="/static/style.css?v=14">
 </head>
 <body data-page="mailboxes">
 <div class="layout">
@@ -19,21 +19,45 @@
         <option value="verify_failed">验证失败</option>
         <option value="verified">已验证</option>
       </select>
+      <select id="mb-category-filter" class="px-input">
+        <option value="">全部分类</option>
+        <option value="uncategorized">未分类</option>
+      </select>
+      <button class="px-btn" onclick="openMailboxCategoryModal()">分类管理</button>
       <button class="px-btn primary" onclick="openImportModal()">批量导入邮箱</button>
     </div>
     <div class="batch-bar" id="mb-batch" style="display:none">
       <span id="mb-batch-count">已选 0 项</span>
+      <select id="batch-mailbox-category" class="px-input batch-select" onchange="assignSelectedMailboxCategory(this.value)">
+        <option value="">批量归类</option>
+        <option value="uncategorized">移出分类</option>
+      </select>
       <button class="px-btn danger" onclick="delSelected()">删除所选</button>
       <button class="px-btn ghost" onclick="clearSelection()">取消</button>
     </div>
     <div class="table-wrap">
       <table class="px-table">
-        <thead><tr><th class="col-check"><input type="checkbox" id="mb-check-all" onclick="toggleSelectAll(this.checked)"></th><th>邮箱</th><th>注册数量</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead>
+        <thead><tr><th class="col-check"><input type="checkbox" id="mb-check-all" onclick="toggleSelectAll(this.checked)"></th><th>邮箱</th><th>分类</th><th>注册数量</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead>
         <tbody id="mb-rows"></tbody>
       </table>
       <div class="pager" id="mb-pager"></div>
     </div>
   </main>
+</div>
+
+<!-- 邮箱分类管理 modal -->
+<div class="modal-mask" id="mailbox-category-modal" style="display:none">
+  <div class="modal px-panel" style="width:520px">
+    <h2>邮箱分类管理</h2>
+    <div class="category-create-row">
+      <input id="new-mailbox-category" class="px-input" maxlength="64" placeholder="输入新分类名称">
+      <button class="px-btn primary" onclick="createMailboxCategory()">新增</button>
+    </div>
+    <div id="mailbox-category-list" class="category-list"></div>
+    <div class="modal-actions">
+      <button class="px-btn" onclick="closeModal('mailbox-category-modal')">关闭</button>
+    </div>
+  </div>
 </div>
 
 <!-- 邮箱编辑 modal -->
@@ -47,6 +71,10 @@
     <label>Client ID（Outlook 取件用）</label><input id="mb-client-id" class="px-input">
     <label>Refresh Token（Outlook 取件用）</label><textarea id="mb-refresh-token" class="px-input" rows="2"></textarea>
     <label>取码 API 地址</label><input id="mb-code-url" class="px-input" type="password" autocomplete="new-password" placeholder="留空保留已保存地址">
+    <label>分类</label>
+    <select id="mb-category" class="px-input">
+      <option value="">未分类</option>
+    </select>
     <label>状态</label>
     <select id="mb-status" class="px-input">
       <option value="unverified">待验证</option>
@@ -103,6 +131,6 @@
 
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js"></script>
-<script src="/static/mailboxes.js?v=8"></script>
+<script src="/static/mailboxes.js?v=9"></script>
 </body>
 </html>
