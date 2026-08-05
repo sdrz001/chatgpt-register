@@ -77,7 +77,7 @@ func TestZeroFissionCountOnlyClaimsMotherAccount(t *testing.T) {
 	if config.FissionCount != 0 {
 		t.Fatalf("FissionCount=%d", config.FissionCount)
 	}
-	claimedMailbox, email, isMother, ok := producer.nextJob(config)
+	claimedMailbox, email, isMother, ok := producer.nextJob(config, Scope{})
 	if !ok || !isMother || claimedMailbox.ID != mailbox.ID || email != mailbox.Email {
 		t.Fatalf("first job mailbox=%d email=%q isMother=%v ok=%v", claimedMailbox.ID, email, isMother, ok)
 	}
@@ -87,8 +87,45 @@ func TestZeroFissionCountOnlyClaimsMotherAccount(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if _, email, _, ok := producer.nextJob(config); ok || email != "" {
+	if _, email, _, ok := producer.nextJob(config, Scope{}); ok || email != "" {
 		t.Fatalf("unexpected fission job email=%q ok=%v", email, ok)
+	}
+}
+
+func TestNextJobFiltersMailboxScope(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Category{}, &models.Mailbox{}, &models.Registration{}); err != nil {
+		t.Fatal(err)
+	}
+	firstCategory := models.Category{Scope: "mailbox", Name: "第一组"}
+	secondCategory := models.Category{Scope: "mailbox", Name: "第二组"}
+	if err := database.Create(&firstCategory).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&secondCategory).Error; err != nil {
+		t.Fatal(err)
+	}
+	mailboxes := []models.Mailbox{
+		{Email: "first@example.test", Status: "verified", CategoryID: &firstCategory.ID},
+		{Email: "second@example.test", Status: "verified", CategoryID: &secondCategory.ID},
+		{Email: "third@example.test", Status: "verified", CategoryID: &firstCategory.ID},
+	}
+	if err := database.Create(&mailboxes).Error; err != nil {
+		t.Fatal(err)
+	}
+	producer := &Producer{db: database, inflight: map[string]uint{}}
+	config := Config{FissionCount: 0}
+	claimed, _, _, ok := producer.nextJob(config, Scope{CategoryID: &secondCategory.ID})
+	if !ok || claimed.ID != mailboxes[1].ID {
+		t.Fatalf("category claimed=%d ok=%v", claimed.ID, ok)
+	}
+	producer.releaseInflight(claimed.Email)
+	claimed, _, _, ok = producer.nextJob(config, Scope{MailboxIDs: []uint{mailboxes[2].ID}})
+	if !ok || claimed.ID != mailboxes[2].ID {
+		t.Fatalf("mailboxes claimed=%d ok=%v", claimed.ID, ok)
 	}
 }
 

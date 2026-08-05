@@ -195,8 +195,29 @@ body {
 .stat-box.violet .stat-ico { background: rgba(124, 58, 237, .13); color: var(--violet); }
 
 /* ===== 工具栏 ===== */
-.toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
+.toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
 .toolbar .search { flex: 1; min-width: 220px; }
+.register-controls { display: flex; align-items: center; gap: 10px; }
+.register-controls .px-select { min-width: 112px; }
+.register-controls .register-count { width: 72px; min-width: 72px; text-align: center; }
+.mailbox-picker { position: relative; }
+.mailbox-picker-btn { width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mailbox-picker-panel {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 70; display: none;
+  width: 330px; padding: 10px; background: #fff; border: 1px solid var(--glass-border);
+  border-radius: 10px; box-shadow: 0 12px 34px rgba(23, 43, 99, .16);
+}
+.mailbox-picker-panel.open { display: block; }
+.mailbox-picker-panel > .px-input { width: 100%; }
+.mailbox-picker-actions { display: flex; justify-content: flex-end; gap: 6px; margin: 8px 0 6px; }
+.mailbox-picker-actions .px-btn { height: 30px; padding: 0 10px; font-size: 12px; }
+.mailbox-picker-options { max-height: 260px; overflow-y: auto; border-top: 1px solid #edf1f7; }
+.mailbox-picker-option { display: flex; align-items: center; gap: 9px; padding: 8px 6px; cursor: pointer; color: var(--text-2); font-size: 13px; }
+.mailbox-picker-option:hover { background: #f6f8fc; }
+.mailbox-picker-option input { accent-color: var(--primary); }
+.mailbox-picker-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mailbox-picker-empty { padding: 20px 8px; text-align: center; color: var(--text-3); font-size: 12.5px; }
+@media (max-width: 900px) { .register-controls { flex-wrap: wrap; } }
 
 .px-input {
   padding: 9px 13px; color: var(--text);
@@ -742,7 +763,8 @@ select.px-input option { background: #fff; }
 .settings-foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 
 /* 自定义开关 */
-.switch-row {
+.switch-row,
+.field > label.switch-row {
   display: inline-flex; align-items: center; gap: 10px; cursor: pointer;
   margin-bottom: 18px; user-select: none;
 }

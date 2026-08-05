@@ -26,7 +26,7 @@ func produceTestHandler(t *testing.T, browser *browserboot.Manager) (*Handler, *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.AutoMigrate(&models.Setting{}, &models.Mailbox{}, &models.Registration{}); err != nil {
+	if err := database.AutoMigrate(&models.Setting{}, &models.Category{}, &models.Mailbox{}, &models.Registration{}); err != nil {
 		t.Fatal(err)
 	}
 	sqlDB, err := database.DB()
@@ -86,11 +86,67 @@ func requestBrowserStatus(t *testing.T, router *gin.Engine) (int, browserBackend
 }
 
 func requestProduce(router *gin.Engine) *httptest.ResponseRecorder {
+	return requestProduceBody(router, `{"count":0}`)
+}
+
+func requestProduceBody(router *gin.Engine, body string) *httptest.ResponseRecorder {
 	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/produce", strings.NewReader(`{"count":0}`))
+	request := httptest.NewRequest(http.MethodPost, "/produce", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(response, request)
 	return response
+}
+
+func TestValidateProduceScope(t *testing.T) {
+	handler, _ := produceTestHandler(t, nil)
+	mailboxCategory := models.Category{Scope: "mailbox", Name: "邮箱组"}
+	accountCategory := models.Category{Scope: "account", Name: "账户组"}
+	if err := handler.DB.Create(&mailboxCategory).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.DB.Create(&accountCategory).Error; err != nil {
+		t.Fatal(err)
+	}
+	verified := models.Mailbox{Email: "verified@example.test", Status: "verified", CategoryID: &mailboxCategory.ID}
+	unverified := models.Mailbox{Email: "pending@example.test", Status: "unverified"}
+	if err := handler.DB.Create(&verified).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.DB.Create(&unverified).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := handler.validateProduceScope(produceInput{Scope: "all"})
+	if err != nil || all.CategoryID != nil || len(all.MailboxIDs) != 0 {
+		t.Fatalf("all=%+v error=%v", all, err)
+	}
+	category, err := handler.validateProduceScope(produceInput{Scope: "category", CategoryID: &mailboxCategory.ID})
+	if err != nil || category.CategoryID == nil || *category.CategoryID != mailboxCategory.ID {
+		t.Fatalf("category=%+v error=%v", category, err)
+	}
+	selected, err := handler.validateProduceScope(produceInput{Scope: "mailboxes", MailboxIDs: []uint{verified.ID, verified.ID}})
+	if err != nil || len(selected.MailboxIDs) != 1 || selected.MailboxIDs[0] != verified.ID {
+		t.Fatalf("selected=%+v error=%v", selected, err)
+	}
+	for name, input := range map[string]produceInput{
+		"missing category": {Scope: "category"},
+		"wrong category":   {Scope: "category", CategoryID: &accountCategory.ID},
+		"empty mailboxes":  {Scope: "mailboxes"},
+		"unverified":       {Scope: "mailboxes", MailboxIDs: []uint{unverified.ID}},
+		"unknown":          {Scope: "other"},
+	} {
+		if _, err := handler.validateProduceScope(input); err == nil {
+			t.Fatalf("%s accepted", name)
+		}
+	}
+}
+
+func TestProduceRejectsScopeBeforeBrowserCheck(t *testing.T) {
+	_, router := produceTestHandler(t, browserboot.New())
+	response := requestProduceBody(router, `{"count":1,"scope":"mailboxes","mailbox_ids":[]}`)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "请选择至少一个邮箱") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
 }
 
 func TestBrowserStatusDefaultsToRodAndGatesProduce(t *testing.T) {
@@ -136,7 +192,7 @@ func TestBrowserStatusRodReadyUsesManagerSnapshot(t *testing.T) {
 		t.Fatalf("message=%q", status.Message)
 	}
 	response := requestProduce(router)
-	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "生产数量必须") {
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "注册数量必须") {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
@@ -162,7 +218,7 @@ func TestBrowserStatusCloakBrowserReadyAndProduceUsesSameCheck(t *testing.T) {
 		t.Fatalf("code=%d status=%+v", code, status)
 	}
 	response := requestProduce(router)
-	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "生产数量必须") {
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "注册数量必须") {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	if calls != 1 {

@@ -27,7 +27,7 @@ func main() {
 	mail := mailfetch.New()
 	p := producer.New(database, mail)
 
-	if err := p.Start(target); err != nil {
+	if err := p.Start(target, producer.Scope{}); err != nil {
 		panic(err)
 	}
 

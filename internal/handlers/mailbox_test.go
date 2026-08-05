@@ -29,10 +29,32 @@ func mailboxTestHandler(t *testing.T) (*Handler, *gin.Engine) {
 	handler := &Handler{DB: database, Mail: mailfetch.New()}
 	router := gin.New()
 	router.POST("/mailboxes/import", handler.MailboxImport)
+	router.GET("/mailboxes/options", handler.MailboxOptions)
 	router.GET("/mailboxes", handler.MailboxList)
 	router.POST("/categories", handler.CategoryCreate)
 	router.POST("/categories/assign", handler.CategoryAssign)
 	return handler, router
+}
+
+func TestMailboxOptionsReturnsOnlyVerifiedIDAndEmail(t *testing.T) {
+	handler, router := mailboxTestHandler(t)
+	mailboxes := []models.Mailbox{
+		{Email: "verified@example.test", Password: "secret", RefreshToken: "refresh", CodeURL: "https://codes.example.test/value", Status: "verified"},
+		{Email: "pending@example.test", Password: "pending-secret", Status: "unverified"},
+	}
+	if err := handler.DB.Create(&mailboxes).Error; err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/mailboxes/options", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "verified@example.test") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, forbidden := range []string{"pending@example.test", "secret", "refresh", "codes.example.test", "status", "password"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("options leaked %q: %s", forbidden, response.Body.String())
+		}
+	}
 }
 
 func TestMailboxImportAPICodeURLIsWriteOnly(t *testing.T) {

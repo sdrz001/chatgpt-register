@@ -80,6 +80,7 @@ func main() {
 		api.POST("/produce/stop", h.ProduceStop)
 		api.GET("/browser/status", h.BrowserStatus)
 
+		api.GET("/mailboxes/options", h.MailboxOptions)
 		api.GET("/mailboxes", h.MailboxList)
 		api.POST("/mailboxes", h.MailboxCreate)
 		api.POST("/mailboxes/import", h.MailboxImport)

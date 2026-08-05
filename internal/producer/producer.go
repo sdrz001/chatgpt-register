@@ -53,6 +53,11 @@ type Config struct {
 	Proxies          []string // 代理池，按账户轮转；空=直连
 }
 
+type Scope struct {
+	CategoryID *uint
+	MailboxIDs []uint
+}
+
 // Progress 生产进度快照，供 /api/produce/status 展示。
 type Progress struct {
 	Running    bool      `json:"running"`
@@ -110,15 +115,20 @@ func New(db *gorm.DB, mail *mailfetch.Client) *Producer {
 	return producer
 }
 
-// Start 启动一次生产（异步）。已在运行则返回错误。
-func (p *Producer) Start(target int) error {
+// Start 启动一次注册任务（异步）。已在运行则返回错误。
+func (p *Producer) Start(target int, selected Scope) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.prog.Running {
-		return fmt.Errorf("生产任务已在运行中")
+		return fmt.Errorf("注册任务已在运行中")
 	}
 	if target < 1 {
-		return fmt.Errorf("生产数量必须 ≥ 1")
+		return fmt.Errorf("注册数量必须 ≥ 1")
+	}
+	scope := Scope{MailboxIDs: append([]uint(nil), selected.MailboxIDs...)}
+	if selected.CategoryID != nil {
+		categoryID := *selected.CategoryID
+		scope.CategoryID = &categoryID
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
@@ -128,7 +138,7 @@ func (p *Producer) Start(target int) error {
 	p.pxIdx = 0
 	p.pxMu.Unlock()
 	p.prog = Progress{Running: true, Target: target, Pending: target, Message: "初始化…", UpdatedAt: time.Now()}
-	go p.run(ctx, target)
+	go p.run(ctx, target, scope)
 	return nil
 }
 
@@ -150,7 +160,7 @@ func (p *Producer) Snapshot() Progress {
 	return cp
 }
 
-func (p *Producer) run(ctx context.Context, target int) {
+func (p *Producer) run(ctx context.Context, target int, scope Scope) {
 	defer func() {
 		p.mu.Lock()
 		p.prog.Running = false
@@ -160,7 +170,11 @@ func (p *Producer) run(ctx context.Context, target int) {
 	}()
 
 	cfg := p.loadConfig()
-	p.logf("开始生产，目标 %d 个账号（每邮箱母号+%d 裂变，并发 %d）", target, cfg.FissionCount, cfg.MaxConcurrency)
+	backendName := "Go Rod"
+	if cfg.BrowserBackend == codexreg.BackendCloakBrowser {
+		backendName = "Python CloakBrowser"
+	}
+	p.logf("开始注册，目标 %d 个账号（每邮箱母号+%d 裂变，并发 %d，浏览器 %s）", target, cfg.FissionCount, cfg.MaxConcurrency, backendName)
 
 	sem := make(chan struct{}, cfg.MaxConcurrency)
 	var wg sync.WaitGroup
@@ -182,7 +196,7 @@ func (p *Producer) run(ctx context.Context, target int) {
 			continue
 		}
 
-		mb, email, isMother, ok := p.nextJob(cfg)
+		mb, email, isMother, ok := p.nextJob(cfg, scope)
 		if !ok {
 			// 暂无可开的新任务：若还有在跑的，等它们（可能失败后要补），否则容量耗尽
 			if p.inflightCount() == 0 {
@@ -243,14 +257,21 @@ func (p *Producer) run(ctx context.Context, target int) {
 	}
 }
 
-// nextJob 领取下一个要注册的账号：先在所有邮箱补齐母号，再开裂变子号。
+// nextJob 领取下一个要注册的账号：先在选定邮箱中补齐母号，再开裂变子号。
 // 每个邮箱同一时刻只允许一个在跑任务（避免验证码串号，也保证母号先行）。
-func (p *Producer) nextJob(cfg Config) (models.Mailbox, string, bool, bool) {
+func (p *Producer) nextJob(cfg Config, scope Scope) (models.Mailbox, string, bool, bool) {
 	p.claimMu.Lock()
 	defer p.claimMu.Unlock()
 
+	query := p.db.Where("status = ?", "verified")
+	if scope.CategoryID != nil {
+		query = query.Where("category_id = ?", *scope.CategoryID)
+	}
+	if len(scope.MailboxIDs) > 0 {
+		query = query.Where("id IN ?", scope.MailboxIDs)
+	}
 	var mailboxes []models.Mailbox
-	if err := p.db.Where("status = ?", "verified").Order("id asc").Find(&mailboxes).Error; err != nil {
+	if err := query.Order("id asc").Find(&mailboxes).Error; err != nil {
 		return models.Mailbox{}, "", false, false
 	}
 
@@ -340,6 +361,7 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 			ignoredMessageIDs[message.ID] = struct{}{}
 		}
 	}
+	appendLog("浏览器后端: " + cfg.BrowserBackend)
 	in := codexreg.Input{
 		Email:            email,
 		Password:         password,

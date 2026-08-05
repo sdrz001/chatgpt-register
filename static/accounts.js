@@ -1,6 +1,6 @@
-/* ===== 账户管理（ChatGPT + Codex 生产） ===== */
+/* ===== 账户管理（ChatGPT + Codex 注册） ===== */
 const ACC_STATUS = {
-  pending: '待生产',
+  pending: '待注册',
   registering: '注册中',
   registered: '已注册',
   register_failed: '注册失败',
@@ -29,6 +29,9 @@ const size = 20;
 let accCache = {};
 let accTotal = 0;
 let accountCategories = [];
+let mailboxCategories = [];
+let registerMailboxes = [];
+const registerMailboxSelected = new Set();
 const accSelected = new Set();
 
 async function load() {
@@ -112,6 +115,25 @@ async function loadAccountCategories() {
   rebuildCategorySelect('filter-account-category', '全部分类', true);
   rebuildCategorySelect('batch-account-category', '批量归类', true);
   renderAccountCategories();
+}
+
+async function loadRegisterSources() {
+  const [categoryResponse, mailboxResponse] = await Promise.all([
+    api('/api/categories?scope=mailbox'),
+    api('/api/mailboxes/options'),
+  ]);
+  const categoryData = await categoryResponse.json().catch(() => ({}));
+  const mailboxData = await mailboxResponse.json().catch(() => ({}));
+  if (categoryResponse.ok) {
+    mailboxCategories = categoryData.data || [];
+    rebuildRegisterCategorySelect();
+  }
+  if (!mailboxResponse.ok) return;
+  registerMailboxes = mailboxData.data || [];
+  const available = new Set(registerMailboxes.map(mailbox => mailbox.id));
+  [...registerMailboxSelected].forEach(id => { if (!available.has(id)) registerMailboxSelected.delete(id); });
+  renderRegisterMailboxes();
+  updateRegisterMailboxLabel();
 }
 
 function rebuildCategorySelect(id, placeholder, includeUncategorized) {
@@ -215,7 +237,76 @@ function checkSelectedAT() {
   return checkAT([...accSelected]);
 }
 
-/* ===== 生产进度 ===== */
+function rebuildRegisterCategorySelect() {
+  const select = document.getElementById('register-category');
+  const current = select.value;
+  select.innerHTML = '<option value="">选择邮箱分组</option>' + mailboxCategories.map(category =>
+    `<option value="${category.id}">${esc(category.name)} (${category.item_count || 0})</option>`
+  ).join('');
+  if ([...select.options].some(option => option.value === current)) select.value = current;
+  if (select._rebuild) select._rebuild();
+}
+
+function updateRegisterScope() {
+  const scope = document.getElementById('register-scope').value;
+  const category = document.getElementById('register-category');
+  const picker = document.getElementById('register-mailbox-picker');
+  category.parentElement.style.display = scope === 'category' ? '' : 'none';
+  picker.style.display = scope === 'mailboxes' ? '' : 'none';
+  if (scope !== 'mailboxes') closeMailboxPicker();
+}
+
+function toggleMailboxPicker(event) {
+  event.stopPropagation();
+  document.getElementById('register-mailbox-panel').classList.toggle('open');
+  if (document.getElementById('register-mailbox-panel').classList.contains('open')) {
+    document.getElementById('register-mailbox-search').focus();
+  }
+}
+
+function closeMailboxPicker() {
+  document.getElementById('register-mailbox-panel').classList.remove('open');
+}
+
+function filteredRegisterMailboxes() {
+  const query = document.getElementById('register-mailbox-search').value.trim().toLowerCase();
+  return query ? registerMailboxes.filter(mailbox => mailbox.email.toLowerCase().includes(query)) : registerMailboxes;
+}
+
+function renderRegisterMailboxes() {
+  const mailboxes = filteredRegisterMailboxes();
+  document.getElementById('register-mailbox-options').innerHTML = mailboxes.map(mailbox => `
+    <label class="mailbox-picker-option">
+      <input type="checkbox" value="${mailbox.id}" ${registerMailboxSelected.has(mailbox.id) ? 'checked' : ''} onchange="toggleRegisterMailbox(${mailbox.id}, this.checked)">
+      <span>${esc(mailbox.email)}</span>
+    </label>`).join('') || '<div class="mailbox-picker-empty">没有匹配的已验证邮箱</div>';
+}
+
+function toggleRegisterMailbox(id, checked) {
+  if (checked) registerMailboxSelected.add(id); else registerMailboxSelected.delete(id);
+  updateRegisterMailboxLabel();
+}
+
+function selectVisibleRegisterMailboxes() {
+  filteredRegisterMailboxes().forEach(mailbox => registerMailboxSelected.add(mailbox.id));
+  renderRegisterMailboxes();
+  updateRegisterMailboxLabel();
+}
+
+function clearRegisterMailboxes() {
+  registerMailboxSelected.clear();
+  renderRegisterMailboxes();
+  updateRegisterMailboxLabel();
+}
+
+function updateRegisterMailboxLabel() {
+  const button = document.getElementById('register-mailbox-btn');
+  button.textContent = registerMailboxSelected.size ? `已选 ${registerMailboxSelected.size} 个邮箱` : '选择邮箱';
+}
+
+document.addEventListener('click', closeMailboxPicker);
+
+/* ===== 注册进度 ===== */
 async function loadProduce() {
   try {
     const r = await api('/api/produce/status');
@@ -228,7 +319,7 @@ async function loadProduce() {
   } catch (e) { /* ignore */ }
 }
 
-/* 浏览器就绪状态：未就绪禁用生产 */
+/* 浏览器就绪状态：未就绪禁用注册 */
 let browserReady = true;
 async function loadBrowserGate() {
   try {
@@ -240,36 +331,40 @@ async function loadBrowserGate() {
       btn.title = browserReady ? '' : (s.message || '缺少浏览器');
     }
     const msg = document.getElementById('pd-msg');
-    if (!browserReady && msg) msg.textContent = '⚠ ' + (s.message || '缺少浏览器，暂不能生产');
+    if (!browserReady && msg) msg.textContent = '⚠ ' + (s.message || '缺少浏览器，暂不能注册');
   } catch (e) { /* ignore */ }
 }
 
-function openProduceModal() {
-  if (!browserReady) return toast('缺少浏览器，正在下载或下载失败，暂不能生产', true);
-  document.getElementById('produce-count').value = 10;
-  document.getElementById('produce-modal').style.display = 'flex';
-}
-
 async function startProduce() {
-  const count = parseInt(document.getElementById('produce-count').value, 10);
-  if (!count || count < 1) return toast('请输入有效数量', true);
+  if (!browserReady) return toast('缺少浏览器，正在下载或下载失败，暂不能注册', true);
+  const count = parseInt(document.getElementById('register-count').value, 10);
+  if (!count || count < 1) return toast('请输入有效注册数量', true);
+  const scope = document.getElementById('register-scope').value;
+  const body = { count, scope };
+  if (scope === 'category') {
+    body.category_id = Number(document.getElementById('register-category').value);
+    if (!body.category_id) return toast('请选择邮箱分组', true);
+  }
+  if (scope === 'mailboxes') {
+    body.mailbox_ids = [...registerMailboxSelected];
+    if (!body.mailbox_ids.length) return toast('请选择至少一个邮箱', true);
+  }
   const r = await api('/api/produce', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ count }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) {
     const d = await r.json().catch(() => ({}));
-    return toast(d.error || '启动生产失败', true);
+    return toast(d.error || '启动注册失败', true);
   }
-  closeModal('produce-modal');
-  toast('已开始生产 ' + count + ' 个账号');
+  toast('已开始注册 ' + count + ' 个账号');
   loadProduce();
   load();
 }
 
 async function stopProduce() {
-  if (!confirm('确定停止当前生产任务?')) return;
+  if (!confirm('确定停止当前注册任务?')) return;
   await api('/api/produce/stop', { method: 'POST' });
   toast('已请求停止');
   loadProduce();
@@ -484,6 +579,8 @@ document.getElementById('new-account-category').addEventListener('keydown', even
 });
 
 loadAccountCategories();
+loadRegisterSources();
+updateRegisterScope();
 load();
 loadProduce();
 loadBrowserGate();

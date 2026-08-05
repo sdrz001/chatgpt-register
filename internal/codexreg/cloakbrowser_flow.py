@@ -204,11 +204,9 @@ async def actionable(page: Any, selector: str, editable: bool = False, timeout: 
     raise SidecarError("element_timeout", "page action element did not become stable", True)
 
 
-async def type_value(page: Any, selector: str, value: str) -> None:
+async def fill_value(page: Any, selector: str, value: str) -> None:
     item = await actionable(page, selector, editable=True)
-    await item.click()
-    await item.press("Control+A")
-    await item.type(value)
+    await item.fill(value)
 
 
 async def click_submit(page: Any) -> None:
@@ -294,7 +292,7 @@ class VerificationCodes:
             raise SidecarError("code_invalid", "verification code attempts are exhausted", True)
         self.attempts += 1
         code = await self.request_code(self.attempts)
-        await type_value(page, CODE, code)
+        await fill_value(page, CODE, code)
         await click_submit(page)
         self.phase = "submitted"
         self.submitted_at = now
@@ -365,7 +363,7 @@ class RegistrationFlow:
 
     async def _handle_email(self, page: Any, now: float) -> None:
         if self.email.pending():
-            await type_value(page, EMAIL, str(self.payload["email"]))
+            await fill_value(page, EMAIL, str(self.payload["email"]))
             await click_submit(page)
             self.email.mark(now)
             return
@@ -373,7 +371,7 @@ class RegistrationFlow:
 
     async def _handle_password(self, page: Any, now: float) -> None:
         if self.password.pending():
-            await type_value(page, PASSWORD, str(self.payload["password"]))
+            await fill_value(page, PASSWORD, str(self.payload["password"]))
             await click_submit(page)
             self.password.mark(now)
             return
@@ -383,7 +381,7 @@ class RegistrationFlow:
         if not self.profile.pending():
             self.profile.ensure_progress(now, "profile_stalled", "profile page did not advance")
             return
-        await type_value(page, NAME, str(self.payload["full_name"]))
+        await fill_value(page, NAME, str(self.payload["full_name"]))
         field = await actionable(page, PROFILE, editable=True)
         await fill_profile_field(field, str(self.payload["age"]))
         await click_submit(page)
@@ -400,7 +398,5 @@ async def fill_profile_field(field: Any, age_value: str) -> None:
         await field.blur()
         return
     age = age_value if age_value.isdigit() else "30"
-    await field.click()
-    await field.press("Control+A")
-    await field.type(age)
+    await field.fill(age)
     await field.blur()

@@ -2,10 +2,13 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"chatgpt-register/internal/models"
+	"chatgpt-register/internal/producer"
 
 	"github.com/gin-gonic/gin"
 )
@@ -94,12 +97,22 @@ func buildCredentials(authData, email string) map[string]any {
 	return out
 }
 
-// Produce 启动一次生产：{ "count": N }。
+type produceInput struct {
+	Count      int    `json:"count"`
+	Scope      string `json:"scope"`
+	CategoryID *uint  `json:"category_id"`
+	MailboxIDs []uint `json:"mailbox_ids"`
+}
+
+// Produce 启动一次注册任务。
 func (h *Handler) Produce(c *gin.Context) {
-	var in struct {
-		Count int `json:"count"`
-	}
+	var in produceInput
 	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	scope, err := h.validateProduceScope(in)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -112,11 +125,58 @@ func (h *Handler) Produce(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": message})
 		return
 	}
-	if err := h.Producer.Start(in.Count); err != nil {
+	if err := h.Producer.Start(in.Count, scope); err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *Handler) validateProduceScope(in produceInput) (producer.Scope, error) {
+	switch in.Scope {
+	case "", "all":
+		return producer.Scope{}, nil
+	case "category":
+		if in.CategoryID == nil {
+			return producer.Scope{}, fmt.Errorf("请选择邮箱分组")
+		}
+		var count int64
+		h.DB.Model(&models.Category{}).Where("id = ? AND scope = ?", *in.CategoryID, "mailbox").Count(&count)
+		if count == 0 {
+			return producer.Scope{}, fmt.Errorf("邮箱分组不存在")
+		}
+		return producer.Scope{CategoryID: in.CategoryID}, nil
+	case "mailboxes":
+		ids := uniqueMailboxIDs(in.MailboxIDs)
+		if len(ids) == 0 {
+			return producer.Scope{}, fmt.Errorf("请选择至少一个邮箱")
+		}
+		var count int64
+		h.DB.Model(&models.Mailbox{}).Where("id IN ? AND status = ?", ids, "verified").Count(&count)
+		if count != int64(len(ids)) {
+			return producer.Scope{}, fmt.Errorf("所选邮箱不存在或尚未验证")
+		}
+		return producer.Scope{MailboxIDs: ids}, nil
+	default:
+		return producer.Scope{}, fmt.Errorf("注册范围无效")
+	}
+}
+
+func uniqueMailboxIDs(ids []uint) []uint {
+	seen := make(map[uint]struct{}, len(ids))
+	unique := make([]uint, 0, len(ids))
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	sort.Slice(unique, func(i, j int) bool { return unique[i] < unique[j] })
+	return unique
 }
 
 // ProduceStatus 返回生产进度（待生产/在跑/已注册/失败/日志）。

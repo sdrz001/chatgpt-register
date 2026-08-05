@@ -43,6 +43,18 @@ func mailboxAccount(mailbox models.Mailbox) mailfetch.Account {
 	}
 }
 
+func (h *Handler) MailboxOptions(c *gin.Context) {
+	var items []struct {
+		ID    uint   `json:"id"`
+		Email string `json:"email"`
+	}
+	if err := h.DB.Model(&models.Mailbox{}).Select("id", "email").Where("status = ?", "verified").Order("email, id").Scan(&items).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
 func (h *Handler) MailboxList(c *gin.Context) {
 	var items []models.Mailbox
 	q := h.DB.Order("id desc")

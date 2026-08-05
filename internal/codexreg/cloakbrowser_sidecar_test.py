@@ -123,6 +123,38 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, "invalid_payload")
 
 
+class LaunchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_launch_context_disables_humanized_input(self):
+        payload = {
+            "email": "person@example.test",
+            "password": "secret",
+            "proxy": "",
+            "headless": False,
+        }
+        registration = sidecar.Registration(sidecar.JsonWriter(io.StringIO()), "request", payload)
+        context = object()
+        launcher = mock.AsyncMock(return_value=context)
+        with mock.patch.object(sidecar, "load_launcher", return_value=launcher):
+            result = await sidecar.launch_context(registration, Path("profile"))
+        self.assertIs(result, context)
+        launcher.assert_awaited_once_with("profile", headless=False)
+
+    async def test_launch_context_keeps_proxy_geoip_without_humanize(self):
+        payload = {
+            "email": "person@example.test",
+            "password": "secret",
+            "proxy": "http://proxy.example.test:8080",
+            "headless": True,
+        }
+        registration = sidecar.Registration(sidecar.JsonWriter(io.StringIO()), "request", payload)
+        launcher = mock.AsyncMock(return_value=object())
+        with mock.patch.object(sidecar, "load_launcher", return_value=launcher):
+            await sidecar.launch_context(registration, Path("profile"))
+        launcher.assert_awaited_once_with(
+            "profile", headless=True, proxy="http://proxy.example.test:8080", geoip=True
+        )
+
+
 class ConversionTests(unittest.TestCase):
     def test_birthdate_accepts_iso_and_converts_age(self):
         today = date(2026, 6, 15)
@@ -219,6 +251,28 @@ class SanitizingAndMessageTests(unittest.TestCase):
         self.assertNotIn("private", stream.getvalue())
 
 
+class InputFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fill_value_writes_complete_value_once(self):
+        flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        field = mock.AsyncMock()
+        page = mock.MagicMock()
+        with mock.patch.object(flow_module, "actionable", new=mock.AsyncMock(return_value=field)):
+            await flow_module.fill_value(page, "input[name='email']", "person@example.test")
+        field.fill.assert_awaited_once_with("person@example.test")
+        field.click.assert_not_awaited()
+        field.press.assert_not_awaited()
+        field.type.assert_not_awaited()
+
+    async def test_age_field_uses_fill(self):
+        flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        field = mock.AsyncMock()
+        field.get_attribute.side_effect = ["age", "text"]
+        await flow_module.fill_profile_field(field, "25")
+        field.fill.assert_awaited_once_with("25")
+        field.type.assert_not_awaited()
+        field.blur.assert_awaited_once()
+
+
 class VerificationFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejected_page_requests_once_until_page_changes(self):
         requested = []
@@ -233,7 +287,7 @@ class VerificationFlowTests(unittest.IsolatedAsyncioTestCase):
         submitted = sidecar.Signals(url=clean.url, body="", code=True)
         rejected = sidecar.Signals(url=clean.url, body="Invalid code", code=True, code_invalid=True)
         flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
-        with mock.patch.object(flow_module, "type_value", new=mock.AsyncMock()), mock.patch.object(
+        with mock.patch.object(flow_module, "fill_value", new=mock.AsyncMock()), mock.patch.object(
             flow_module, "click_submit", new=mock.AsyncMock()
         ), mock.patch.object(flow_module, "click_action", new=mock.AsyncMock(return_value=True)):
             await codes.step(page, clean, "code", 1.0)
@@ -255,7 +309,7 @@ class VerificationFlowTests(unittest.IsolatedAsyncioTestCase):
         page = mock.MagicMock()
         codes = sidecar.RegistrationFlow({}, request_code, mock.AsyncMock()).codes
         flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
-        with mock.patch.object(flow_module, "type_value", new=mock.AsyncMock()), mock.patch.object(
+        with mock.patch.object(flow_module, "fill_value", new=mock.AsyncMock()), mock.patch.object(
             flow_module, "click_submit", new=mock.AsyncMock()
         ), mock.patch.object(flow_module, "click_action", new=mock.AsyncMock(return_value=True)):
             for attempt in range(1, 4):

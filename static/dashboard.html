@@ -31,10 +31,10 @@
       <div class="stat-box cyan"><div class="stat-info"><div class="stat-num" id="st-mailbox_verified">0</div><div class="stat-label">可用邮箱</div></div><div class="stat-ico">✉</div></div>
     </div>
 
-    <!-- 生产任务实时进度 -->
+    <!-- 注册任务实时进度 -->
     <div class="px-panel dash-produce" id="dash-produce">
       <div class="dash-produce-head">
-        <h2>生产任务</h2>
+        <h2>注册任务</h2>
         <span class="dash-produce-state" id="pp-state">空闲</span>
       </div>
       <div class="dash-produce-body">
@@ -47,7 +47,7 @@
           <div class="dash-produce-msg" id="pp-msg"></div>
         </div>
         <div class="dp-pills">
-          <div class="dp-pill amber"><b id="pp-pending">0</b><span>待生产</span></div>
+          <div class="dp-pill amber"><b id="pp-pending">0</b><span>待注册</span></div>
           <div class="dp-pill cyan"><b id="pp-running">0</b><span>在跑</span></div>
           <div class="dp-pill red"><b id="pp-failed">0</b><span>失败</span></div>
         </div>
@@ -97,7 +97,7 @@
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js"></script>
 <script>
-const DASH_STATUS = { pending: '待生产', registering: '注册中', registered: '已注册', register_failed: '注册失败' };
+const DASH_STATUS = { pending: '待注册', registering: '注册中', registered: '已注册', register_failed: '注册失败' };
 const STATUS_COLOR = { registered: '#16a34a', registering: '#0891b2', register_failed: '#e11d48', pending: '#d97706' };
 
 function set(id, v) { const el = document.getElementById(id); if (el) el.textContent = v; }
@@ -150,7 +150,7 @@ function renderProduce(d) {
   set('pp-pending', d.produce_pending || 0);
   set('pp-running', d.produce_running || 0);
   set('pp-failed', d.produce_failed || 0);
-  set('pp-msg', d.produce_message || (running ? '' : '当前无生产任务'));
+  set('pp-msg', d.produce_message || (running ? '' : '当前无注册任务'));
   const pct = target > 0 ? Math.min(100, Math.round(done / target * 100)) : 0;
   document.getElementById('pp-bar').style.width = pct + '%';
 }

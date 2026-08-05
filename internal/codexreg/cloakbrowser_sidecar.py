@@ -238,11 +238,7 @@ def scaled_clip(size: Mapping[str, Any], factor: float) -> dict[str, int]:
 
 
 async def launch_context(registration: Registration, profile: Path) -> Any:
-    options: dict[str, Any] = {
-        "headless": registration.payload["headless"],
-        "humanize": True,
-        "human_preset": "careful",
-    }
+    options: dict[str, Any] = {"headless": registration.payload["headless"]}
     if registration.payload["proxy"]:
         options.update(proxy=registration.payload["proxy"], geoip=True)
     launch_task = asyncio.create_task(load_launcher()(str(profile), **options))
