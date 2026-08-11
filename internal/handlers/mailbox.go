@@ -61,6 +61,11 @@ func (h *Handler) MailboxList(c *gin.Context) {
 	if s := c.Query("status"); s != "" {
 		q = q.Where("status = ?", s)
 	}
+	if s := c.Query("registration_status"); s == "unregistered" {
+		q = q.Where("NOT EXISTS (SELECT 1 FROM registrations WHERE registrations.mailbox_id = mailboxes.id OR registrations.email = mailboxes.email)")
+	} else if s == "registered" {
+		q = q.Where("EXISTS (SELECT 1 FROM registrations WHERE registrations.mailbox_id = mailboxes.id OR registrations.email = mailboxes.email)")
+	}
 	if s := c.Query("category_id"); s != "" {
 		if s == "uncategorized" {
 			q = q.Where("category_id IS NULL")

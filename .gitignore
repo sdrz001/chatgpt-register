@@ -2,6 +2,9 @@ adskull.db
 adskull-register
 adskull-register.exe
 chatgpt-register-local.exe
+/chatgpt-register-*.exe
+/chatgpt-register-*.exe~
+/*-failure.png
 .gomodcache/
 .gocache/
 .gotmp/

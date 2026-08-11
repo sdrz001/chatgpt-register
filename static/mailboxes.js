@@ -20,10 +20,12 @@ async function loadMailboxes() {
   try {
     const q = document.getElementById('mb-search').value.trim();
     const status = document.getElementById('mb-filter').value;
+    const registrationStatus = document.getElementById('mb-registration-filter').value;
     const category = document.getElementById('mb-category-filter').value;
     const params = new URLSearchParams({ page: mbPage, size });
     if (q) params.set('q', q);
     if (status) params.set('status', status);
+    if (registrationStatus) params.set('registration_status', registrationStatus);
     if (category) params.set('category_id', category);
     const r = await api('/api/mailboxes?' + params);
     const d = await r.json();
@@ -550,7 +552,7 @@ let mbTimer = setInterval(() => {
 document.getElementById('mb-search').addEventListener('keydown', e => {
   if (e.key === 'Enter') { mbPage = 1; loadMailboxes(); }
 });
-['mb-filter', 'mb-category-filter'].forEach(id => {
+['mb-filter', 'mb-registration-filter', 'mb-category-filter'].forEach(id => {
   document.getElementById(id).addEventListener('change', () => { mbPage = 1; loadMailboxes(); });
 });
 document.getElementById('new-mailbox-category').addEventListener('keydown', event => {

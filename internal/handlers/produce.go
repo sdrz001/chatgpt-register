@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"chatgpt-register/internal/models"
@@ -204,7 +205,8 @@ func (h *Handler) RegistrationLog(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"email": reg.Email, "status": reg.Status,
-		"note": reg.Note, "log": reg.Log,
+		"note":     strings.ToValidUTF8(reg.Note, "�"),
+		"log":      strings.ToValidUTF8(reg.Log, "�"),
 		"has_shot": len(reg.Shot) > 0,
 	})
 }
@@ -227,6 +229,71 @@ func (h *Handler) RegistrationShot(c *gin.Context) {
 // 出库状态只能由下载接口自动标记，避免库存状态被人工改乱。
 func (h *Handler) SetShipped(c *gin.Context) {
 	c.JSON(http.StatusForbidden, gin.H{"error": "出库状态已锁定，只能由下载操作自动更新"})
+}
+
+func (h *Handler) RegistrationMailboxLinks(c *gin.Context) {
+	var in struct {
+		IDs []uint `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(in.IDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "未选择账号"})
+		return
+	}
+
+	var regs []models.Registration
+	if err := h.DB.Select("id", "email", "mailbox_id").Where("id IN ?", in.IDs).Find(&regs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	regByID := make(map[uint]models.Registration, len(regs))
+	mailboxIDs := make([]uint, 0, len(regs))
+	for _, reg := range regs {
+		regByID[reg.ID] = reg
+		if reg.MailboxID != 0 {
+			mailboxIDs = append(mailboxIDs, reg.MailboxID)
+		}
+	}
+
+	var mailboxes []models.Mailbox
+	if len(mailboxIDs) > 0 {
+		if err := h.DB.Select("id", "code_url").Where("id IN ?", mailboxIDs).Find(&mailboxes).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	mailboxByID := make(map[uint]models.Mailbox, len(mailboxes))
+	for _, mailbox := range mailboxes {
+		mailboxByID[mailbox.ID] = mailbox
+	}
+
+	type mailboxLink struct {
+		RegistrationID uint   `json:"registration_id"`
+		Email          string `json:"email"`
+		CodeURL        string `json:"code_url"`
+	}
+	items := make([]mailboxLink, 0, len(in.IDs))
+	for _, id := range in.IDs {
+		reg, exists := regByID[id]
+		if !exists {
+			continue
+		}
+		mailbox, exists := mailboxByID[reg.MailboxID]
+		codeURL := strings.TrimSpace(mailbox.CodeURL)
+		if !exists || codeURL == "" {
+			continue
+		}
+		items = append(items, mailboxLink{RegistrationID: reg.ID, Email: reg.Email, CodeURL: codeURL})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items":   items,
+		"count":   len(items),
+		"skipped": len(in.IDs) - len(items),
+	})
 }
 
 func (h *Handler) AccessTokens(c *gin.Context) {

@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"chatgpt-register/internal/categorysync"
 	"chatgpt-register/internal/codexoauth"
 	"chatgpt-register/internal/codexreg"
 	"chatgpt-register/internal/emailalias"
@@ -33,15 +34,23 @@ import (
 )
 
 const (
-	defaultMaxConcurrency = 3
-	defaultFissionCount   = 5
-	codePollTimeout       = 3 * time.Minute
-	codePollInterval      = 5 * time.Second
-	maxLogLines           = 300
+	defaultMaxConcurrency   = 3
+	defaultFissionCount     = 5
+	codePollTimeout         = 3 * time.Minute
+	codePollFastWindow      = 20 * time.Second
+	codePollFastInterval    = 2 * time.Second
+	codePollSlowInterval    = 5 * time.Second
+	registrationMaxAttempts = 3
+	registrationRetryBase   = 15 * time.Second
+	maxLogLines             = 300
 )
 
 // openAI 验证码：6 位数字。
-var codeRe = regexp.MustCompile(`\b(\d{6})\b`)
+var (
+	codeRe            = regexp.MustCompile(`\b(\d{6})\b`)
+	producerNow       = time.Now
+	codeURLReuseDelay = 15 * time.Second
+)
 
 // Config 从系统设置装载的运行参数。
 type Config struct {
@@ -76,6 +85,12 @@ type smsLeaseToken struct {
 	marker byte
 }
 
+type registrationAttempt struct {
+	count     int
+	retryAt   time.Time
+	exhausted bool
+}
+
 type mailClient interface {
 	ListMessages(context.Context, mailfetch.Account, int) ([]mailfetch.Message, error)
 	GetMessage(context.Context, mailfetch.Account, string) (mailfetch.Message, error)
@@ -92,9 +107,9 @@ type Producer struct {
 
 	claimMu  sync.Mutex      // 串行化任务领取
 	inflight map[string]uint // email -> mailboxID，正在处理中的任务
-	// failed 记录当前仍处于失败态的邮箱（重试成功后会移除）。
-	// 只有最终没能注册成功的邮箱才计入失败数——中途重试失败不算。
+	// failed 记录当前仍处于失败态的注册地址（重试成功后会移除）。
 	failed   map[string]struct{}
+	attempts map[string]registrationAttempt
 	pxMu     sync.Mutex
 	pxIdx    int
 	smsMu    sync.Mutex
@@ -107,7 +122,7 @@ type Producer struct {
 
 func New(db *gorm.DB, mail *mailfetch.Client) *Producer {
 	producer := &Producer{
-		db: db, mail: mail, inflight: map[string]uint{}, failed: map[string]struct{}{}, smsLease: map[uint]*smsLeaseToken{},
+		db: db, mail: mail, inflight: map[string]uint{}, failed: map[string]struct{}{}, attempts: map[string]registrationAttempt{}, smsLease: map[uint]*smsLeaseToken{},
 		authorizeCodex: codexoauth.Authorize,
 		newSMSClient:   func(config smsactivate.Config) (*smsactivate.Client, error) { return smsactivate.New(config) },
 	}
@@ -134,6 +149,7 @@ func (p *Producer) Start(target int, selected Scope) error {
 	p.cancel = cancel
 	p.inflight = map[string]uint{}
 	p.failed = map[string]struct{}{}
+	p.attempts = map[string]registrationAttempt{}
 	p.pxMu.Lock()
 	p.pxIdx = 0
 	p.pxMu.Unlock()
@@ -192,18 +208,21 @@ func (p *Producer) run(ctx context.Context, target int, scope Scope) {
 			if running == 0 {
 				break
 			}
-			time.Sleep(500 * time.Millisecond)
+			if !waitProducer(ctx, 500*time.Millisecond) {
+				break
+			}
 			continue
 		}
 
 		mb, email, isMother, ok := p.nextJob(cfg, scope)
 		if !ok {
-			// 暂无可开的新任务：若还有在跑的，等它们（可能失败后要补），否则容量耗尽
-			if p.inflightCount() == 0 {
+			if p.inflightCount() == 0 && !p.registrationRetryPending() {
 				p.logf("没有更多可用邮箱容量，本次已产出 %d 个", p.producedThisRun())
 				break
 			}
-			time.Sleep(800 * time.Millisecond)
+			if !waitProducer(ctx, 800*time.Millisecond) {
+				break
+			}
 			continue
 		}
 
@@ -221,6 +240,7 @@ func (p *Producer) run(ctx context.Context, target int, scope Scope) {
 			defer func() {
 				if r := recover(); r != nil {
 					p.markFailed(email)
+					p.scheduleRegistrationRetry(email)
 					msg := fmt.Sprintf("注册异常(panic): %v", r)
 					// log 传空，保留 appendLog 实时写入的账号日志
 					p.setRegistrationFailed(email, msg, "")
@@ -237,7 +257,12 @@ func (p *Producer) run(ctx context.Context, target int, scope Scope) {
 				} else {
 					// 记为失败态；若后续重试成功会被 markSuccess 清除
 					p.markFailed(email)
-					p.logf("✗ %s 注册失败：%v", mask(email), err)
+					attempt, exhausted := p.scheduleRegistrationRetry(email)
+					if exhausted {
+						p.logf("✗ %s 注册失败：%v；本轮已尝试 %d 次，跳过该地址", mask(email), err, attempt)
+					} else {
+						p.logf("✗ %s 注册失败：%v；稍后进行第 %d/%d 次尝试", mask(email), err, attempt+1, registrationMaxAttempts)
+					}
 				}
 			} else {
 				p.markSuccess(email)
@@ -259,6 +284,54 @@ func (p *Producer) run(ctx context.Context, target int, scope Scope) {
 
 // nextJob 领取下一个要注册的账号：先在选定邮箱中补齐母号，再开裂变子号。
 // 每个邮箱同一时刻只允许一个在跑任务（避免验证码串号，也保证母号先行）。
+func (p *Producer) registrationAttemptReady(email string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.attempts == nil {
+		return true
+	}
+	attempt, exists := p.attempts[email]
+	return !exists || (!attempt.exhausted && !producerNow().Before(attempt.retryAt))
+}
+
+func (p *Producer) registrationRetryPending() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, attempt := range p.attempts {
+		if !attempt.exhausted && producerNow().Before(attempt.retryAt) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Producer) scheduleRegistrationRetry(email string) (int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.attempts == nil {
+		p.attempts = map[string]registrationAttempt{}
+	}
+	attempt := p.attempts[email]
+	attempt.count++
+	attempt.exhausted = attempt.count >= registrationMaxAttempts
+	if !attempt.exhausted {
+		attempt.retryAt = producerNow().Add(time.Duration(attempt.count) * registrationRetryBase)
+	}
+	p.attempts[email] = attempt
+	return attempt.count, attempt.exhausted
+}
+
+func waitProducer(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func (p *Producer) nextJob(cfg Config, scope Scope) (models.Mailbox, string, bool, bool) {
 	p.claimMu.Lock()
 	defer p.claimMu.Unlock()
@@ -277,7 +350,7 @@ func (p *Producer) nextJob(cfg Config, scope Scope) (models.Mailbox, string, boo
 
 	// Pass 1：母号（邮箱本身地址）未注册成功且该邮箱空闲 → 注册母号
 	for _, mb := range mailboxes {
-		if p.mailboxBusy(mb.ID) {
+		if p.mailboxBusy(mb.ID) || !p.registrationAttemptReady(mb.Email) {
 			continue
 		}
 		if !p.isRegistered(mb.Email) {
@@ -294,11 +367,14 @@ func (p *Producer) nextJob(cfg Config, scope Scope) (models.Mailbox, string, boo
 		if !p.isRegistered(mb.Email) {
 			continue
 		}
-		if p.fissionCount(mb) >= cfg.FissionCount {
-			continue
-		}
-		alias := p.nextFissionEmail(mb.Email)
+		alias := p.retryableFissionEmail(mb)
 		if alias == "" {
+			if p.fissionCount(mb) >= cfg.FissionCount {
+				continue
+			}
+			alias = p.nextFissionEmail(mb.Email)
+		}
+		if alias == "" || !p.registrationAttemptReady(alias) {
 			continue
 		}
 		p.markInflight(alias, mb.ID)
@@ -318,13 +394,17 @@ func mailAccount(mailbox models.Mailbox) mailfetch.Account {
 func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox, email string, isMother bool) error {
 	password := codexreg.GenPassword(16)
 	accountProxy := p.nextProxy(cfg)
+	categoryID, err := categorysync.AccountCategoryID(p.db, mb.CategoryID)
+	if err != nil {
+		return fmt.Errorf("同步邮箱分类: %w", err)
+	}
 	note := ""
 	if !isMother {
 		note = "裂变(" + mb.Email + ")"
 	}
 	p.upsert(models.Registration{
 		Email: email, MailboxID: mb.ID, Password: password, Proxy: accountProxy,
-		Status: "registering", IsMother: isMother, Note: note,
+		Status: "registering", IsMother: isMother, Note: note, CategoryID: categoryID,
 	})
 
 	var logMu sync.Mutex
@@ -375,7 +455,14 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 			p.logf("%s", "  "+mask(email)+" "+msg)
 		},
 		FetchCode: func(ctx context.Context) (string, error) {
-			return p.fetchCodeAfter(ctx, mb, since, ignoredMessageIDs)
+			appendLog("正在等待邮箱验证码")
+			code, fetchErr := p.fetchCodeAfter(ctx, mb, since, ignoredMessageIDs)
+			if fetchErr != nil {
+				appendLog("邮箱验证码读取失败: " + fetchErr.Error())
+				return "", fetchErr
+			}
+			appendLog("已读取邮箱验证码，交给浏览器提交")
+			return code, nil
 		},
 		SaveShot: func(png []byte) {
 			p.db.Model(&models.Registration{}).Where("email = ?", email).Update("shot", png)
@@ -399,7 +486,7 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 	_, expiresAt, _ := codexreg.AccessTokenDetails(res.AccessToken)
 	p.upsert(models.Registration{
 		Email: email, MailboxID: mb.ID, Password: password, Proxy: accountProxy,
-		Status: "registered", IsMother: isMother, Note: note,
+		Status: "registered", IsMother: isMother, Note: note, CategoryID: categoryID,
 		AuthData: string(authBytes), AccountID: res.AccountID,
 		UserID: res.UserID, PlanType: res.PlanType, ATStatus: "valid",
 		ATCheckedAt: &now, ATExpiresAt: expiresAt, Log: logBuf.String(),
@@ -432,7 +519,9 @@ func (p *Producer) fetchCodeAfter(ctx context.Context, mb models.Mailbox, since 
 		ignoredIDs = map[string]struct{}{}
 	}
 	acc := mailAccount(mb)
-	deadline := time.Now().Add(codePollTimeout)
+	codeURL := strings.TrimSpace(acc.CodeURL) != ""
+	startedAt := time.Now()
+	deadline := startedAt.Add(codePollTimeout)
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
@@ -440,7 +529,8 @@ func (p *Producer) fetchCodeAfter(ctx context.Context, mb models.Mailbox, since 
 		msgs, err := p.mail.ListMessages(ctx, acc, 15)
 		if err == nil {
 			for _, m := range msgs {
-				if _, ignored := ignoredIDs[m.ID]; ignored || m.ReceivedAt.Before(since) || !looksLikeOpenAI(m) {
+				_, ignored := ignoredIDs[m.ID]
+				if (ignored && (!codeURL || time.Since(startedAt) < codeURLReuseDelay)) || (!codeURL && m.ReceivedAt.Before(since)) || !looksLikeOpenAI(m) {
 					continue
 				}
 				if code := codeRe.FindStringSubmatch(m.Subject); code != nil {
@@ -457,10 +547,18 @@ func (p *Producer) fetchCodeAfter(ctx context.Context, mb models.Mailbox, since 
 				}
 			}
 		}
+		interval := codePollSlowInterval
+		if time.Since(startedAt) < codePollFastWindow {
+			interval = codePollFastInterval
+		}
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			return "", ctx.Err()
-		case <-time.After(codePollInterval):
+		case <-timer.C:
 		}
 	}
 	return "", fmt.Errorf("超时未收到验证码邮件")
@@ -533,7 +631,7 @@ func (p *Producer) isRegistered(email string) bool {
 func (p *Producer) fissionCount(mb models.Mailbox) int {
 	var n int64
 	q := p.db.Model(&models.Registration{}).
-		Where("mailbox_id = ? AND status IN ? AND email <> ?", mb.ID, []string{"registered", "already_registered"}, mb.Email)
+		Where("mailbox_id = ? AND status IN ? AND email <> ?", mb.ID, []string{"registered", "already_registered", "register_failed"}, mb.Email)
 	q.Count(&n)
 	count := int(n)
 	// 加上该邮箱在跑的裂变
@@ -545,6 +643,19 @@ func (p *Producer) fissionCount(mb models.Mailbox) int {
 	}
 	p.mu.Unlock()
 	return count
+}
+
+func (p *Producer) retryableFissionEmail(mailbox models.Mailbox) string {
+	var registrations []models.Registration
+	if err := p.db.Select("email").Where("mailbox_id = ? AND status = ? AND email <> ?", mailbox.ID, "register_failed", mailbox.Email).Find(&registrations).Error; err != nil {
+		return ""
+	}
+	for _, registration := range registrations {
+		if p.registrationAttemptReady(registration.Email) {
+			return registration.Email
+		}
+	}
+	return ""
 }
 
 func (p *Producer) nextFissionEmail(base string) string {
@@ -616,7 +727,7 @@ func (p *Producer) upsert(reg models.Registration) {
 		updates := map[string]any{
 			"password": reg.Password, "status": reg.Status,
 			"is_mother": reg.IsMother, "note": reg.Note, "mailbox_id": reg.MailboxID,
-			"proxy": reg.Proxy,
+			"proxy": reg.Proxy, "category_id": reg.CategoryID,
 		}
 		if reg.AuthData != "" {
 			updates["auth_data"] = reg.AuthData
@@ -680,6 +791,9 @@ func (p *Producer) incRegistered() {
 // markFailed 把邮箱标记为失败态，失败数=仍处于失败态的邮箱数。
 func (p *Producer) markFailed(email string) {
 	p.mu.Lock()
+	if p.failed == nil {
+		p.failed = map[string]struct{}{}
+	}
 	p.failed[email] = struct{}{}
 	p.prog.Failed = len(p.failed)
 	p.mu.Unlock()

@@ -21,6 +21,9 @@ const SUB2API_STATUS = {
 const AT_STATUS = {
   unchecked: '待检测', checking: '检测中', valid: '有效', invalid: '失效', error: '检测失败', missing: '无 AT',
 };
+const PLUS_MAIL_STATUS = {
+  unchecked: '未检查', found: '已确认', not_found: '未发现', error: '检查失败',
+};
 const PLAN_LABEL = {
   free: 'Free', go: 'Go', plus: 'Plus', pro: 'Pro', team: 'Team', business: 'Business', enterprise: 'Enterprise', edu: 'Edu',
 };
@@ -33,6 +36,7 @@ let mailboxCategories = [];
 let registerMailboxes = [];
 const registerMailboxSelected = new Set();
 const accSelected = new Set();
+let plusMailChecking = false;
 
 async function load() {
   const q = document.getElementById('search').value.trim();
@@ -52,7 +56,7 @@ async function load() {
   accTotal = d.total || 0;
   (d.data || []).forEach(x => { accCache[x.id] = x; });
   document.getElementById('rows').innerHTML = (d.data || []).map(rowHtml).join('')
-    || '<tr><td colspan="10" style="text-align:center;color:var(--text-3)">暂无数据</td></tr>';
+    || '<tr><td colspan="11" style="text-align:center;color:var(--text-3)">暂无数据</td></tr>';
   const maxPage = Math.max(1, Math.ceil((d.total || 0) / size));
   renderPager('pager', page, maxPage, p => { page = p; load(); });
   syncBatchBar();
@@ -67,6 +71,8 @@ function rowHtml(x) {
   const sub2apiTitle = x.sub2api_error ? esc(x.sub2api_error) : (x.sub2api_account_id ? '远端账号 #' + x.sub2api_account_id : '');
   const atStatus = x.status === 'registered' ? (x.at_status || 'unchecked') : 'missing';
   const atTitle = [x.at_error, x.at_checked_at ? '最近检测：' + fmtTime(x.at_checked_at) : '', x.at_expires_at ? '到期：' + fmtTime(x.at_expires_at) : ''].filter(Boolean).join('\n');
+  const plusMailStatus = x.plus_mail_status || 'unchecked';
+  const plusMailTitle = [x.plus_mail_subject, x.plus_mail_error, x.plus_mail_received_at ? '邮件时间：' + fmtTime(x.plus_mail_received_at) : '', x.plus_mail_checked_at ? '检查时间：' + fmtTime(x.plus_mail_checked_at) : ''].filter(Boolean).join('\n');
   const plan = String(x.plan_type || '').toLowerCase();
   return `
     <tr class="${accSelected.has(x.id) ? 'row-sel' : ''}">
@@ -75,6 +81,7 @@ function rowHtml(x) {
       <td>${x.category ? `<span class="category-chip">${esc(x.category.name)}</span>` : '<span class="table-muted">未分类</span>'}</td>
       <td><span class="badge at-${esc(atStatus)}" title="${esc(atTitle)}">${AT_STATUS[atStatus] || esc(atStatus)}</span></td>
       <td><span class="plan-badge plan-${esc(plan || 'unknown')}">${PLAN_LABEL[plan] || esc(plan || '未知')}</span></td>
+      <td><span class="badge ${plusMailStatus === 'found' ? 'registered' : (plusMailStatus === 'error' ? 'register_failed' : 'pending')}" title="${esc(plusMailTitle)}">${PLUS_MAIL_STATUS[plusMailStatus] || esc(plusMailStatus)}</span></td>
       <td><span class="badge ${esc(x.status)}">${ACC_STATUS[x.status] || esc(x.status)}</span></td>
       <td><span class="badge ${esc(x.codex_status || 'pending')}" title="${codexTitle}">${CODEX_STATUS[x.codex_status] || '待授权'}</span></td>
       <td><span class="badge ${esc(x.sub2api_status || 'not_imported')}" title="${sub2apiTitle}">${SUB2API_STATUS[x.sub2api_status] || '未导入'}</span></td>
@@ -88,8 +95,14 @@ function rowHtml(x) {
         <button class="icon-btn" title="复制 AT" ${canCopyAT ? '' : 'disabled'} onclick="copyAccAT(${x.id})">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         </button>
+        <button class="icon-btn" title="复制邮箱----取件URL" onclick="copyMailboxLinks([${x.id}])">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
+        </button>
         <button class="icon-btn" title="检测 AT 与套餐" ${canCopyAT && atStatus !== 'checking' ? '' : 'disabled'} onclick="checkAT([${x.id}])">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 1-2.34-5.66"/><path d="M20 4v7h-7"/><path d="m9 12 2 2 4-4"/></svg>
+        </button>
+        <button class="icon-btn" title="检查 Plus 开通邮件" onclick="checkPlusMail([${x.id}])">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/><path d="m16 3 1 2 2 .5-1.5 1.5.5 2-2-1-2 1 .5-2L13 5.5l2-.5z"/></svg>
         </button>
         <button class="icon-btn" title="${x.codex_status === 'authorized' ? '重新获取 Codex OAuth' : '获取 Codex OAuth'}" ${canAuthorizeCodex ? '' : 'disabled'} onclick="authorizeCodex(${x.id})">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15 8l3 3M18 5l3 3"/></svg>
@@ -235,6 +248,51 @@ async function checkAT(ids) {
 
 function checkSelectedAT() {
   return checkAT([...accSelected]);
+}
+
+async function checkPlusMail(ids) {
+  if (!ids.length || plusMailChecking) return;
+  plusMailChecking = true;
+  const batchButton = document.getElementById('batch-plus-mail-btn');
+  const progress = document.getElementById('plus-mail-progress');
+  if (batchButton) {
+    batchButton.disabled = true;
+    batchButton.textContent = '检查中...';
+  }
+  if (progress) {
+    progress.textContent = '正在检查 ' + ids.length + ' 个邮箱，请稍候...';
+    progress.style.display = 'inline';
+  }
+  toast('已开始检查 ' + ids.length + ' 个 Plus 邮箱');
+  try {
+    const r = await api('/api/registrations/plus-mail-check', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || 'Plus 邮件检查失败');
+    const found = Number(d.found || 0);
+    const notFound = Number(d.not_found || 0);
+    const failed = Number(d.failed || 0);
+    const result = '检查完成：确认 ' + found + '，未发现 ' + notFound + (failed ? '，失败 ' + failed : '');
+    if (progress) progress.textContent = result;
+    toast('Plus 邮件' + result, failed > 0 && found === 0);
+    await load();
+  } catch (error) {
+    const message = error && error.message ? error.message : 'Plus 邮件检查失败';
+    if (progress) progress.textContent = '检查失败：' + message;
+    toast(message, true);
+  } finally {
+    plusMailChecking = false;
+    if (batchButton) {
+      batchButton.disabled = false;
+      batchButton.textContent = '检查 Plus 邮件';
+    }
+    syncBatchBar();
+  }
+}
+
+function checkSelectedPlusMail() {
+  return checkPlusMail([...accSelected]);
 }
 
 function rebuildRegisterCategorySelect() {
@@ -438,7 +496,7 @@ function toggleSelectAll(checked) {
 function clearSelection() { accSelected.clear(); load(); }
 function syncBatchBar() {
   const bar = document.getElementById('acc-batch');
-  bar.style.display = accSelected.size ? 'flex' : 'none';
+  bar.style.display = accSelected.size || plusMailChecking ? 'flex' : 'none';
   document.getElementById('acc-batch-count').textContent = '已选 ' + accSelected.size + ' 项';
   const all = document.getElementById('acc-check-all');
   const ids = Object.keys(accCache).map(Number);
@@ -483,6 +541,31 @@ async function copyAccAT(id) {
     return toast('复制失败，请检查浏览器剪贴板权限', true);
   }
   toast('AT 已复制');
+}
+
+function copySelectedMailboxLinks() {
+  return copyMailboxLinks([...accSelected]);
+}
+
+async function copyMailboxLinks(ids) {
+  if (!ids.length) return;
+  const r = await api('/api/registrations/mailbox-links', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '读取邮箱取件 URL 失败', true);
+  const items = Array.isArray(d.items) ? d.items : [];
+  if (!items.length) return toast('所选账号没有配置取件 URL', true);
+  const text = items.map(item => item.email + '----' + item.code_url).join('\n');
+  try {
+    await copyText(text);
+  } catch (e) {
+    return toast('复制失败，请检查浏览器剪贴板权限', true);
+  }
+  const skipped = Number(d.skipped) || 0;
+  toast('已复制 ' + items.length + ' 条邮箱取件信息' + (skipped ? '，跳过 ' + skipped + ' 项' : ''));
 }
 
 async function copyText(text) {

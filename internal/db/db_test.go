@@ -47,6 +47,56 @@ func TestInitMigratesIntegrationModels(t *testing.T) {
 	}
 }
 
+func TestInitBackfillsRegistrationCategoryFromMailbox(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	database, err := Init(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailboxCategory := models.Category{Scope: "mailbox", Name: "老邮箱组"}
+	if err := database.Create(&mailboxCategory).Error; err != nil {
+		t.Fatal(err)
+	}
+	mailbox := models.Mailbox{Email: "legacy@example.test", Status: "verified", CategoryID: &mailboxCategory.ID}
+	if err := database.Create(&mailbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	registration := models.Registration{Email: "legacy+account@example.test", MailboxID: mailbox.ID, Status: "registered"}
+	if err := database.Create(&registration).Error; err != nil {
+		t.Fatal(err)
+	}
+	firstSQL, err := database.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := firstSQL.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = Init(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSQL, err := database.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondSQL.Close()
+	if err := database.First(&registration, registration.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if registration.CategoryID == nil {
+		t.Fatal("registration category was not backfilled")
+	}
+	var category models.Category
+	if err := database.First(&category, *registration.CategoryID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if category.Scope != "account" || category.Name != mailboxCategory.Name {
+		t.Fatalf("category=%+v", category)
+	}
+}
+
 func TestInitReclaimsOrphanIntegrationStates(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
 	database, err := Init(path)

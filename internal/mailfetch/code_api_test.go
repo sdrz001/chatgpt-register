@@ -39,6 +39,16 @@ func TestExtractAPICodeFormats(t *testing.T) {
 	}
 }
 
+func TestExtractAPICodeFromICloudHTML(t *testing.T) {
+	body := `<html><head><style>body{color:#202123}.main{color:#353740}</style></head><body>
+		<p>输入此临时验证码以继续：</p>
+		<p style="color:#5D5D5D">343142</p>
+	</body></html>`
+	if actual := extractAPICode([]byte(body)); actual != "343142" {
+		t.Fatalf("extractAPICode HTML=%q want 343142", actual)
+	}
+}
+
 func TestCodeAPIMessageLifecycle(t *testing.T) {
 	code := "111111"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -74,6 +84,29 @@ func TestCodeAPIMessageLifecycle(t *testing.T) {
 	second, err := client.ListMessages(context.Background(), account, 20)
 	if err != nil || len(second) != 1 || second[0].Text != "222222" || second[0].ID == first[0].ID {
 		t.Fatalf("second=%v error=%v", second, err)
+	}
+}
+
+func TestCodeURLArchiveReturnsHistoricalMailBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("n") != "50" {
+			t.Errorf("query=%v", r.URL.Query())
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<html><head><style>.amount{color:#202123}</style></head><body><div class="su">ChatGPT - 你的新套餐</div><div class="bd"><p>你已成功订阅 ChatGPT Plus。</p><span>ChatGPT Plus Subscription</span><span>$20.00</span></div></body></html>`)
+	}))
+	defer server.Close()
+
+	client := New(WithHTTPClient(server.Client()))
+	message, err := client.GetCodeURLArchive(context.Background(), Account{CodeURL: server.URL + "/mailbox?token=secret"}, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(message.Text, "你已成功订阅 ChatGPT Plus") || !strings.Contains(message.HTML, "ChatGPT Plus Subscription") {
+		t.Fatalf("message=%+v", message)
+	}
+	if strings.Contains(message.Text, "#202123") {
+		t.Fatalf("visible text retained style content: %q", message.Text)
 	}
 }
 

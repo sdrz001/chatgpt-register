@@ -237,6 +237,25 @@ func TestFetchCodeAfterConsumesMessageID(t *testing.T) {
 	}
 }
 
+func TestFetchCodeAfterReusesCodeURLValueAfterDelay(t *testing.T) {
+	originalDelay := codeURLReuseDelay
+	codeURLReuseDelay = 0
+	t.Cleanup(func() { codeURLReuseDelay = originalDelay })
+	message := mailfetch.Message{
+		ID: "api-code-same", From: "codes.example.test", FromName: "验证码 API",
+		Subject: "OpenAI verification code 333333", ReceivedAt: time.Now(), Text: "333333",
+	}
+	producer := &Producer{mail: fakeMailClient{list: func(context.Context, mailfetch.Account, int) ([]mailfetch.Message, error) {
+		return []mailfetch.Message{message}, nil
+	}}}
+	ignored := map[string]struct{}{message.ID: {}}
+	mailbox := models.Mailbox{Email: integrationEmail, CodeURL: "https://codes.example.test/latest"}
+	code, err := producer.fetchCodeAfter(context.Background(), mailbox, time.Now(), ignored)
+	if err != nil || code != "333333" {
+		t.Fatalf("code=%q error=%v", code, err)
+	}
+}
+
 func TestAuthorizeCodexEmailOTPOnlyUsesMessagesAfterSnapshot(t *testing.T) {
 	producer, registration := codexIntegrationTestProducer(t)
 	calls := 0

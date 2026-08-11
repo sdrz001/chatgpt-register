@@ -7,6 +7,13 @@ import (
 	"time"
 )
 
+func TestRegistrationLauncherDisablesImages(t *testing.T) {
+	launcher := registrationLauncher(true)
+	if value := launcher.Get("blink-settings"); value != "imagesEnabled=false" {
+		t.Fatalf("blink-settings=%q", value)
+	}
+}
+
 func TestClassifyRegistrationPage(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -9,10 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +35,11 @@ var (
 	ErrCodeNotFound   = errors.New("取码 API 暂无验证码")
 	searchFolders     = []string{"Inbox", "JunkEmail"}
 	apiCodeRe         = regexp.MustCompile(`\b(\d{6})\b`)
+	apiCodeContextRe  = regexp.MustCompile(`(?i)(?:verification\s+code|temporary\s+code|security\s+code|one[- ]time\s+(?:code|password)|验证码|驗證碼|認証コード|認證碼|otp)[^0-9]{0,80}(\d{6})`)
+	apiStyleRe        = regexp.MustCompile(`(?is)<(?:style|script)\b[^>]*>.*?</(?:style|script)>`)
+	apiCommentRe      = regexp.MustCompile(`(?s)<!--.*?-->`)
+	apiTagRe          = regexp.MustCompile(`(?s)<[^>]*>`)
+	apiHTMLDocRe      = regexp.MustCompile(`(?i)<(?:!doctype|html|body)\b`)
 )
 
 // Account 一条邮箱凭据。
@@ -149,6 +156,7 @@ func (c *Client) ListMessages(ctx context.Context, acc Account, limit int) ([]Me
 
 	type folderResult struct {
 		msgs []graphMessage
+		err  error
 	}
 	results := make([]folderResult, len(searchFolders))
 	var wg sync.WaitGroup
@@ -156,29 +164,73 @@ func (c *Client) ListMessages(ctx context.Context, acc Account, limit int) ([]Me
 		wg.Add(1)
 		go func(i int, folder string) {
 			defer wg.Done()
-			if msgs, ferr := c.listFolder(ctx, tok, acc, folder, limit); ferr == nil {
-				results[i].msgs = msgs
-			}
+			results[i].msgs, results[i].err = c.listFolder(ctx, tok, acc, folder, limit)
 		}(i, folder)
 	}
 	wg.Wait()
 
 	var all []graphMessage
-	for _, r := range results {
-		all = append(all, r.msgs...)
+	var firstErr error
+	for _, result := range results {
+		all = append(all, result.msgs...)
+		if result.err != nil && firstErr == nil {
+			firstErr = result.err
+		}
 	}
-	out := make([]Message, 0, len(all))
-	for _, m := range all {
-		t, _ := time.Parse(time.RFC3339, m.ReceivedDateTime)
+	if len(all) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return messagesFromGraph(all, limit), nil
+}
+
+func (c *Client) SearchMessages(ctx context.Context, acc Account, query string, limit int) ([]Message, error) {
+	if strings.TrimSpace(acc.CodeURL) != "" {
+		message, err := c.GetCodeURLArchive(ctx, acc, limit)
+		if err != nil {
+			return nil, err
+		}
+		return []Message{message}, nil
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []Message{}, nil
+	}
+	if limit < 1 {
+		limit = 100
+	}
+	tok, err := c.accessToken(ctx, acc)
+	if err != nil {
+		return nil, err
+	}
+	values := url.Values{}
+	values.Set("$search", `"`+strings.ReplaceAll(query, `"`, " ")+`"`)
+	values.Set("$top", strconv.Itoa(limit))
+	values.Set("$select", "id,subject,receivedDateTime,from")
+	nextURL := fmt.Sprintf("%s/me/messages?%s", graphBase, values.Encode())
+	all := make([]graphMessage, 0, limit)
+	for nextURL != "" && len(all) < limit {
+		page, next, pageErr := c.listMessagesPage(ctx, tok, acc, nextURL)
+		if pageErr != nil {
+			return nil, pageErr
+		}
+		all = append(all, page...)
+		nextURL = next
+	}
+	return messagesFromGraph(all, limit), nil
+}
+
+func messagesFromGraph(messages []graphMessage, limit int) []Message {
+	out := make([]Message, 0, len(messages))
+	for _, message := range messages {
+		receivedAt, _ := time.Parse(time.RFC3339, message.ReceivedDateTime)
 		out = append(out, Message{
-			ID:         m.ID,
-			From:       m.From.EmailAddress.Address,
-			FromName:   m.From.EmailAddress.Name,
-			Subject:    m.Subject,
-			ReceivedAt: t,
+			ID:         message.ID,
+			From:       message.From.EmailAddress.Address,
+			FromName:   message.From.EmailAddress.Name,
+			Subject:    message.Subject,
+			ReceivedAt: receivedAt,
 		})
 	}
-	// 合并后按时间倒序
 	for i := 0; i < len(out); i++ {
 		for j := i + 1; j < len(out); j++ {
 			if out[j].ReceivedAt.After(out[i].ReceivedAt) {
@@ -189,7 +241,7 @@ func (c *Client) ListMessages(ctx context.Context, acc Account, limit int) ([]Me
 	if len(out) > limit {
 		out = out[:limit]
 	}
-	return out, nil
+	return out
 }
 
 // GetMessage 按消息 ID 拉取单封邮件的完整正文（HTML + 纯文本）。
@@ -254,40 +306,45 @@ func (c *Client) GetMessage(ctx context.Context, acc Account, msgID string) (Mes
 	}, nil
 }
 
+func (c *Client) GetCodeURLArchive(ctx context.Context, acc Account, limit int) (Message, error) {
+	parsed, err := url.Parse(strings.TrimSpace(acc.CodeURL))
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return Message{}, ErrInvalidCodeURL
+	}
+	if limit < 1 {
+		limit = 20
+	}
+	query := parsed.Query()
+	query.Set("n", strconv.Itoa(limit))
+	parsed.RawQuery = query.Encode()
+	body, contentType, err := c.fetchCodeURLBody(ctx, parsed.String(), "text/html, application/json, text/plain, */*", 8<<20)
+	if err != nil {
+		return Message{}, err
+	}
+	digest := sha256.Sum256(body)
+	message := Message{
+		ID:         "api-archive-" + hex.EncodeToString(digest[:8]),
+		From:       parsed.Hostname(),
+		FromName:   "取件 URL",
+		Subject:    "邮箱历史邮件",
+		ReceivedAt: time.Now(),
+		Text:       visibleHTMLText(body),
+	}
+	if strings.Contains(strings.ToLower(contentType), "html") || apiHTMLDocRe.Match(body) {
+		message.HTML = string(body)
+	}
+	return message, nil
+}
+
 func (c *Client) fetchCodeAPI(ctx context.Context, acc Account) (Message, error) {
 	rawURL := strings.TrimSpace(acc.CodeURL)
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return Message{}, ErrInvalidCodeURL
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	body, _, err := c.fetchCodeURLBody(ctx, rawURL, "application/json, text/plain, */*", 1<<20)
 	if err != nil {
-		return Message{}, ErrInvalidCodeURL
-	}
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("User-Agent", "chatgpt-register/1.0")
-	apiClient := *c.http
-	apiClient.CheckRedirect = func(redirect *http.Request, via []*http.Request) error {
-		if len(via) >= 5 || (redirect.URL.Scheme != "http" && redirect.URL.Scheme != "https") {
-			return ErrCodeAPIFailed
-		}
-		redirect.Header.Del("Referer")
-		return nil
-	}
-	resp, err := apiClient.Do(req)
-	if err != nil {
-		return Message{}, ErrCodeAPIFailed
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotFound {
-		return Message{}, ErrCodeNotFound
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Message{}, fmt.Errorf("%w: HTTP %d", ErrCodeAPIFailed, resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return Message{}, ErrCodeAPIFailed
+		return Message{}, err
 	}
 	code := extractAPICode(body)
 	if code == "" {
@@ -304,6 +361,46 @@ func (c *Client) fetchCodeAPI(ctx context.Context, acc Account) (Message, error)
 	}, nil
 }
 
+func (c *Client) fetchCodeURLBody(ctx context.Context, rawURL, accept string, maxBytes int64) ([]byte, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, "", ErrInvalidCodeURL
+	}
+	req.Header.Set("Accept", accept)
+	req.Header.Set("User-Agent", "chatgpt-register/1.0")
+	apiClient := *c.http
+	apiClient.CheckRedirect = func(redirect *http.Request, via []*http.Request) error {
+		if len(via) >= 5 || (redirect.URL.Scheme != "http" && redirect.URL.Scheme != "https") {
+			return ErrCodeAPIFailed
+		}
+		redirect.Header.Del("Referer")
+		return nil
+	}
+	resp, err := apiClient.Do(req)
+	if err != nil {
+		return nil, "", ErrCodeAPIFailed
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotFound {
+		return nil, "", ErrCodeNotFound
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("%w: HTTP %d", ErrCodeAPIFailed, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	if err != nil {
+		return nil, "", ErrCodeAPIFailed
+	}
+	return body, resp.Header.Get("Content-Type"), nil
+}
+
+func visibleHTMLText(body []byte) string {
+	visible := apiStyleRe.ReplaceAll(body, []byte(" "))
+	visible = apiCommentRe.ReplaceAll(visible, []byte(" "))
+	visible = apiTagRe.ReplaceAll(visible, []byte(" "))
+	return strings.TrimSpace(wsRe.ReplaceAllString(html.UnescapeString(string(visible)), " "))
+}
+
 func extractAPICode(body []byte) string {
 	var payload any
 	if json.Unmarshal(body, &payload) == nil {
@@ -311,7 +408,11 @@ func extractAPICode(body []byte) string {
 			return code
 		}
 	}
-	match := apiCodeRe.FindSubmatch(body)
+	visible := []byte(visibleHTMLText(body))
+	if match := apiCodeContextRe.FindSubmatch(visible); len(match) > 1 {
+		return string(match[1])
+	}
+	match := apiCodeRe.FindSubmatch(visible)
 	if len(match) < 2 {
 		return ""
 	}
@@ -375,6 +476,37 @@ type graphMessage struct {
 			Name    string `json:"name"`
 		} `json:"emailAddress"`
 	} `json:"from"`
+}
+
+func (c *Client) listMessagesPage(ctx context.Context, tok string, acc Account, requestURL string) ([]graphMessage, string, error) {
+	resp, err := c.graphGet(ctx, tok, requestURL)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		resp.Body.Close()
+		c.invalidate(acc.RefreshToken)
+		newTok, tokenErr := c.accessToken(ctx, acc)
+		if tokenErr != nil {
+			return nil, "", tokenErr
+		}
+		resp, err = c.graphGet(ctx, newTok, requestURL)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("graph status=%d", resp.StatusCode)
+	}
+	var data struct {
+		Value    []graphMessage `json:"value"`
+		NextLink string         `json:"@odata.nextLink"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, "", err
+	}
+	return data.Value, data.NextLink, nil
 }
 
 func (c *Client) listFolder(ctx context.Context, tok string, acc Account, folder string, top int) ([]graphMessage, error) {

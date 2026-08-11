@@ -1,6 +1,8 @@
 package producer
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +59,33 @@ func TestLoadConfigReadsCloakBrowserSettings(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsAndRotatesProxyPool(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Setting{}); err != nil {
+		t.Fatal(err)
+	}
+	settings := []models.Setting{
+		{Key: "proxy_enabled", Value: "1"},
+		{Key: "proxy_list", Value: "proxy-a\nproxy-b, proxy-c"},
+	}
+	if err := database.Create(&settings).Error; err != nil {
+		t.Fatal(err)
+	}
+	producer := &Producer{db: database}
+	config := producer.loadConfig()
+	if got := strings.Join(config.Proxies, ","); got != "proxy-a,proxy-b,proxy-c" {
+		t.Fatalf("proxies=%q", got)
+	}
+	got := []string{producer.nextProxy(config), producer.nextProxy(config), producer.nextProxy(config), producer.nextProxy(config)}
+	want := []string{"proxy-a", "proxy-b", "proxy-c", "proxy-a"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rotated proxies=%v want=%v", got, want)
+	}
+}
+
 func TestZeroFissionCountOnlyClaimsMotherAccount(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -72,7 +101,7 @@ func TestZeroFissionCountOnlyClaimsMotherAccount(t *testing.T) {
 	if err := database.Create(&mailbox).Error; err != nil {
 		t.Fatal(err)
 	}
-	producer := &Producer{db: database, inflight: map[string]uint{}}
+	producer := &Producer{db: database, inflight: map[string]uint{}, attempts: map[string]registrationAttempt{}}
 	config := producer.loadConfig()
 	if config.FissionCount != 0 {
 		t.Fatalf("FissionCount=%d", config.FissionCount)
@@ -116,7 +145,7 @@ func TestNextJobFiltersMailboxScope(t *testing.T) {
 	if err := database.Create(&mailboxes).Error; err != nil {
 		t.Fatal(err)
 	}
-	producer := &Producer{db: database, inflight: map[string]uint{}}
+	producer := &Producer{db: database, inflight: map[string]uint{}, attempts: map[string]registrationAttempt{}}
 	config := Config{FissionCount: 0}
 	claimed, _, _, ok := producer.nextJob(config, Scope{CategoryID: &secondCategory.ID})
 	if !ok || claimed.ID != mailboxes[1].ID {
@@ -129,12 +158,108 @@ func TestNextJobFiltersMailboxScope(t *testing.T) {
 	}
 }
 
-func TestUpsertPersistsProxyWithoutClearingIntegrationState(t *testing.T) {
+func TestNextJobLimitsFailuresAndLetsOtherMailboxesRun(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.AutoMigrate(&models.Registration{}); err != nil {
+	if err := database.AutoMigrate(&models.Mailbox{}, &models.Registration{}); err != nil {
+		t.Fatal(err)
+	}
+	mailboxes := []models.Mailbox{
+		{Email: "first@example.test", Status: "verified"},
+		{Email: "second@example.test", Status: "verified"},
+	}
+	if err := database.Create(&mailboxes).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	originalNow := producerNow
+	producerNow = func() time.Time { return now }
+	t.Cleanup(func() { producerNow = originalNow })
+	producer := &Producer{db: database, inflight: map[string]uint{}, attempts: map[string]registrationAttempt{}}
+	config := Config{FissionCount: 0}
+
+	claimed, email, _, ok := producer.nextJob(config, Scope{})
+	if !ok || claimed.ID != mailboxes[0].ID {
+		t.Fatalf("first claim mailbox=%d email=%q ok=%v", claimed.ID, email, ok)
+	}
+	producer.releaseInflight(email)
+	producer.scheduleRegistrationRetry(email)
+	claimed, email, _, ok = producer.nextJob(config, Scope{})
+	if !ok || claimed.ID != mailboxes[1].ID {
+		t.Fatalf("second claim mailbox=%d email=%q ok=%v", claimed.ID, email, ok)
+	}
+	producer.releaseInflight(email)
+	producer.scheduleRegistrationRetry(email)
+
+	for attempt := 1; attempt < registrationMaxAttempts; attempt++ {
+		now = now.Add(time.Hour)
+		for _, mailbox := range mailboxes {
+			claimed, email, _, ok = producer.nextJob(config, Scope{})
+			if !ok || claimed.ID != mailbox.ID {
+				t.Fatalf("attempt=%d mailbox=%d claimed=%d email=%q ok=%v", attempt+1, mailbox.ID, claimed.ID, email, ok)
+			}
+			producer.releaseInflight(email)
+			producer.scheduleRegistrationRetry(email)
+		}
+	}
+	if _, email, _, ok = producer.nextJob(config, Scope{}); ok || email != "" {
+		t.Fatalf("exhausted job email=%q ok=%v", email, ok)
+	}
+}
+
+func TestFailedFissionRetriesThenConsumesOneSlot(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Mailbox{}, &models.Registration{}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox := models.Mailbox{Email: "mother@example.test", Status: "verified"}
+	if err := database.Create(&mailbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&models.Registration{MailboxID: mailbox.ID, Email: mailbox.Email, Status: "registered", IsMother: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	alias := "child@example.test"
+	if err := database.Create(&models.Registration{MailboxID: mailbox.ID, Email: alias, Status: "register_failed"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	originalNow := producerNow
+	producerNow = func() time.Time { return now }
+	t.Cleanup(func() { producerNow = originalNow })
+	producer := &Producer{db: database, inflight: map[string]uint{}, attempts: map[string]registrationAttempt{}}
+	producer.scheduleRegistrationRetry(alias)
+	now = now.Add(time.Hour)
+	claimed, email, isMother, ok := producer.nextJob(Config{FissionCount: 1}, Scope{})
+	if !ok || isMother || claimed.ID != mailbox.ID || email != alias {
+		t.Fatalf("retry claim mailbox=%d email=%q isMother=%v ok=%v", claimed.ID, email, isMother, ok)
+	}
+	producer.releaseInflight(email)
+	producer.scheduleRegistrationRetry(alias)
+	producer.scheduleRegistrationRetry(alias)
+	if _, email, _, ok = producer.nextJob(Config{FissionCount: 1}, Scope{}); ok || email != "" {
+		t.Fatalf("exhausted fission email=%q ok=%v", email, ok)
+	}
+	if count := producer.fissionCount(mailbox); count != 1 {
+		t.Fatalf("fission count=%d", count)
+	}
+}
+
+func TestUpsertPersistsCategoryWithoutClearingIntegrationState(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Category{}, &models.Registration{}); err != nil {
+		t.Fatal(err)
+	}
+	category := models.Category{Scope: "account", Name: "Plus 邮箱"}
+	if err := database.Create(&category).Error; err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
@@ -149,12 +274,12 @@ func TestUpsertPersistsProxyWithoutClearingIntegrationState(t *testing.T) {
 	}
 	producer := &Producer{db: database}
 	producer.upsert(models.Registration{
-		Email: existing.Email, Password: "new-password", Status: "registered", Proxy: "http://new-proxy",
+		Email: existing.Email, Password: "new-password", Status: "registered", Proxy: "http://new-proxy", CategoryID: &category.ID,
 	})
 	if err := database.First(&existing, existing.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if existing.Proxy != "http://new-proxy" || existing.Password != "new-password" {
+	if existing.Proxy != "http://new-proxy" || existing.Password != "new-password" || existing.CategoryID == nil || *existing.CategoryID != category.ID {
 		t.Fatalf("registration=%+v", existing)
 	}
 	if existing.CodexStatus != "authorized" || existing.Sub2APIStatus != "imported" || existing.Sub2APIAccountID == nil || *existing.Sub2APIAccountID != 91 {

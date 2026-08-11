@@ -87,7 +87,10 @@
     <div class="batch-bar" id="acc-batch" style="display:none">
       <span id="acc-batch-count">已选 0 项</span>
       <button class="px-btn primary" onclick="copySelectedAT()">复制 AT</button>
+      <button class="px-btn" onclick="copySelectedMailboxLinks()">复制邮箱----取件URL</button>
       <button class="px-btn" onclick="checkSelectedAT()">检测 AT</button>
+      <button class="px-btn" id="batch-plus-mail-btn" onclick="checkSelectedPlusMail()">检查 Plus 邮件</button>
+      <span id="plus-mail-progress" style="display:none"></span>
       <select id="batch-account-category" class="px-input batch-select" onchange="assignSelectedCategory(this.value)">
         <option value="">批量归类</option>
         <option value="uncategorized">移出分类</option>
@@ -101,7 +104,7 @@
       <table class="px-table">
         <thead><tr>
           <th class="col-check"><input type="checkbox" id="acc-check-all" onclick="toggleSelectAll(this.checked)"></th>
-          <th>邮箱</th><th>分类</th><th>AT 状态</th><th>套餐</th><th>注册状态</th><th>Codex</th><th>Sub2API</th><th>出库</th><th>操作</th>
+          <th>邮箱</th><th>分类</th><th>AT 状态</th><th>套餐</th><th>Plus 邮件</th><th>注册状态</th><th>Codex</th><th>Sub2API</th><th>出库</th><th>操作</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
@@ -152,6 +155,6 @@
 
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js?v=2"></script>
-<script src="/static/accounts.js?v=15"></script>
+<script src="/static/accounts.js?v=20"></script>
 </body>
 </html>

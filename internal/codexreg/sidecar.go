@@ -32,9 +32,10 @@ const (
 
 var (
 	emailPattern            = regexp.MustCompile(`(?i)[a-z0-9.!#$%&'*+/=?^_\x60{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+`)
-	jwtPattern              = regexp.MustCompile(`\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\b`)
+	jwtPattern              = regexp.MustCompile(`\b[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\b`)
 	proxyAuthPattern        = regexp.MustCompile(`(?i)((?:https?|socks5)://)[^/@\s]+@`)
-	tokenValuePattern       = regexp.MustCompile(`(?i)((?:access[_-]?token|token|bearer)\s*[:=]?\s*)[^\s,;]+`)
+	tokenValuePattern       = regexp.MustCompile(`(?i)((?:access[_-]?token|token)\s*[:=]\s*)[^\s,;]+`)
+	bearerValuePattern      = regexp.MustCompile(`(?i)(bearer\s+)[^\s,;]+`)
 	verificationCodePattern = regexp.MustCompile(`\b[0-9]{4,8}\b`)
 )
 
@@ -104,6 +105,7 @@ type sidecarProcess struct {
 func startSidecarProcess(python, script string) (*sidecarProcess, error) {
 	processCtx, forceStop := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(processCtx, python, script)
+	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8", "PYTHONUTF8=1")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		forceStop()
@@ -183,7 +185,8 @@ func (s *sidecarSession) handle(message sidecarMessage) (bool, error) {
 	case "ready":
 		return false, nil
 	case "log":
-		s.input.logf("%s", redactSensitive(message.Message, s.input, s.code, s.token))
+		text := strings.ToValidUTF8(message.Message, "�")
+		s.input.logf("%s", redactSensitive(text, s.input, s.code, s.token))
 	case "code_request":
 		code, err := s.input.FetchCode(s.ctx)
 		if err != nil {
@@ -420,7 +423,8 @@ func fileExists(path string) bool {
 }
 
 func sidecarFailure(err error, stderr string, in Input, code, token string) error {
-	message := redactSensitive(err.Error(), in, code, token)
+	message := redactSensitive(strings.ToValidUTF8(err.Error(), "�"), in, code, token)
+	stderr = strings.ToValidUTF8(stderr, "�")
 	stderr = strings.TrimSpace(redactSensitive(stderr, in, code, token))
 	if stderr != "" {
 		message += "; sidecar stderr: " + stderr
@@ -444,6 +448,7 @@ func redactSensitive(text string, in Input, code, token string) string {
 	text = jwtPattern.ReplaceAllString(text, "[token]")
 	text = proxyAuthPattern.ReplaceAllString(text, `${1}[redacted]@`)
 	text = tokenValuePattern.ReplaceAllString(text, `${1}[redacted]`)
+	text = bearerValuePattern.ReplaceAllString(text, `${1}[redacted]`)
 	text = verificationCodePattern.ReplaceAllString(text, "[code]")
 	return text
 }

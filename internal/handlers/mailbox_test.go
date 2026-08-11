@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -31,6 +32,8 @@ func mailboxTestHandler(t *testing.T) (*Handler, *gin.Engine) {
 	router.POST("/mailboxes/import", handler.MailboxImport)
 	router.GET("/mailboxes/options", handler.MailboxOptions)
 	router.GET("/mailboxes", handler.MailboxList)
+	router.POST("/registrations/mailbox-links", handler.RegistrationMailboxLinks)
+	router.POST("/registrations/plus-mail-check", handler.RegistrationPlusMailCheck)
 	router.POST("/categories", handler.CategoryCreate)
 	router.POST("/categories/assign", handler.CategoryAssign)
 	return handler, router
@@ -54,6 +57,74 @@ func TestMailboxOptionsReturnsOnlyVerifiedIDAndEmail(t *testing.T) {
 		if strings.Contains(response.Body.String(), forbidden) {
 			t.Fatalf("options leaked %q: %s", forbidden, response.Body.String())
 		}
+	}
+}
+
+func TestMailboxListFiltersByRegistrationStatus(t *testing.T) {
+	handler, router := mailboxTestHandler(t)
+	mailboxes := []models.Mailbox{
+		{Email: "alpha@example.test", Status: "verified"},
+		{Email: "beta@example.test", Status: "verified"},
+	}
+	if err := handler.DB.Create(&mailboxes).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.DB.Create(&models.Registration{
+		Email: mailboxes[1].Email, MailboxID: mailboxes[1].ID, Status: "registered",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	assertList := func(value, included, excluded string) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/mailboxes?registration_status="+value, nil))
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), included) || strings.Contains(response.Body.String(), excluded) {
+			t.Fatalf("filter=%s status=%d body=%s", value, response.Code, response.Body.String())
+		}
+	}
+	assertList("unregistered", mailboxes[0].Email, mailboxes[1].Email)
+	assertList("registered", mailboxes[1].Email, mailboxes[0].Email)
+}
+
+func TestRegistrationPlusMailCheckFindsCodeURLArchiveAndUpdatesPlan(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("n") != "200" {
+			t.Errorf("query=%v", r.URL.Query())
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<html><body><div class="fr">OpenAI</div><div class="su">ChatGPT - 你的新套餐</div><div class="bd">你已成功订阅 ChatGPT Plus。<span>ChatGPT Plus Subscription</span><span>$20.00</span></div></body></html>`)
+	}))
+	defer server.Close()
+
+	handler, router := mailboxTestHandler(t)
+	handler.Mail = mailfetch.New(mailfetch.WithHTTPClient(server.Client()))
+	mailbox := models.Mailbox{Email: "plus@example.test", CodeURL: server.URL + "/inbox?token=secret", Status: "verified"}
+	if err := handler.DB.Create(&mailbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	registration := models.Registration{
+		Email: mailbox.Email, MailboxID: mailbox.ID, Status: "registered", PlanType: "free",
+		AuthData: `{"plan_type":"free","credentials":{"plan_type":"free"}}`,
+	}
+	if err := handler.DB.Create(&registration).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/registrations/plus-mail-check", strings.NewReader(fmt.Sprintf(`{"ids":[%d]}`, registration.ID)))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"found":1`) || !strings.Contains(response.Body.String(), `"status":"found"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if err := handler.DB.First(&registration, registration.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if registration.PlanType != "plus" || registration.PlusMailStatus != "found" || registration.PlusMailCheckedAt == nil || registration.PlusMailSubject == "" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	if !strings.Contains(registration.AuthData, `"plan_type": "plus"`) {
+		t.Fatalf("auth_data=%s", registration.AuthData)
 	}
 }
 
@@ -147,5 +218,55 @@ func TestMailboxImportRejectsInvalidCodeURL(t *testing.T) {
 	var count int64
 	if err := handler.DB.Model(&models.Mailbox{}).Count(&count).Error; err != nil || count != 0 {
 		t.Fatalf("count=%d error=%v", count, err)
+	}
+}
+
+func TestRegistrationMailboxLinksReturnsSelectedOrderAndSkipsMissingURL(t *testing.T) {
+	handler, router := mailboxTestHandler(t)
+	mailboxes := []models.Mailbox{
+		{Email: "first@example.test", CodeURL: "https://codes.example.test/first?token=one", Status: "verified"},
+		{Email: "second@example.test", Status: "verified"},
+		{Email: "third@example.test", CodeURL: "https://codes.example.test/third?token=three", Status: "verified"},
+	}
+	if err := handler.DB.Create(&mailboxes).Error; err != nil {
+		t.Fatal(err)
+	}
+	registrations := []models.Registration{
+		{Email: "first+account@example.test", MailboxID: mailboxes[0].ID},
+		{Email: "second+account@example.test", MailboxID: mailboxes[1].ID},
+		{Email: "third+account@example.test", MailboxID: mailboxes[2].ID},
+	}
+	if err := handler.DB.Create(&registrations).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"ids":[` + strconv.FormatUint(uint64(registrations[2].ID), 10) + `,` + strconv.FormatUint(uint64(registrations[1].ID), 10) + `,` + strconv.FormatUint(uint64(registrations[0].ID), 10) + `,999999]}`
+	request := httptest.NewRequest(http.MethodPost, "/registrations/mailbox-links", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Items []struct {
+			RegistrationID uint   `json:"registration_id"`
+			Email          string `json:"email"`
+			CodeURL        string `json:"code_url"`
+		} `json:"items"`
+		Count   int `json:"count"`
+		Skipped int `json:"skipped"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Count != 2 || result.Skipped != 2 || len(result.Items) != 2 {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.Items[0].RegistrationID != registrations[2].ID || result.Items[0].Email != registrations[2].Email || result.Items[0].CodeURL != mailboxes[2].CodeURL {
+		t.Fatalf("first item=%+v", result.Items[0])
+	}
+	if result.Items[1].RegistrationID != registrations[0].ID || result.Items[1].Email != registrations[0].Email || result.Items[1].CodeURL != mailboxes[0].CodeURL {
+		t.Fatalf("second item=%+v", result.Items[1])
 	}
 }

@@ -67,7 +67,9 @@ func main() {
 		api.POST("/registrations/:id/sub2api-import", h.RegistrationSub2APIImport)
 		api.POST("/download", h.Download)
 		api.POST("/access-tokens", h.AccessTokens)
+		api.POST("/registrations/mailbox-links", h.RegistrationMailboxLinks)
 		api.POST("/registrations/at-check", h.RegistrationATCheck)
+		api.POST("/registrations/plus-mail-check", h.RegistrationPlusMailCheck)
 
 		api.GET("/categories", h.CategoryList)
 		api.POST("/categories", h.CategoryCreate)

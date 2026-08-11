@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence, TextIO
+from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence, TextIO
 from urllib.parse import quote, urlsplit
 
 try:
@@ -46,8 +46,9 @@ LOGIN_URL = "https://chatgpt.com/auth/login"
 SESSION_URL = "https://chatgpt.com/api/auth/session"
 EMAIL_RE = re.compile(r"(?i)[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}")
 PROXY_RE = re.compile(r"(?i)(https?|socks5)://[^/@\s]+@")
-JWT_RE = re.compile(r"\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\b")
-TOKEN_RE = re.compile(r"(?i)((?:access[_-]?token|bearer)\s*[:=]?\s*)[^\s,;]+")
+JWT_RE = re.compile(r"\b[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\b")
+TOKEN_RE = re.compile(r"(?i)((?:access[_-]?token)\s*[:=]\s*)[^\s,;]+")
+BEARER_RE = re.compile(r"(?i)(bearer\s+)[^\s,;]+")
 CODE_RE = re.compile(r"\b[0-9]{4,8}\b")
 PROXY_SCHEMES = {"http", "https", "socks5"}
 
@@ -86,6 +87,7 @@ def redact_sensitive(value: str, secrets: Sequence[str] = ()) -> str:
     text = PROXY_RE.sub(r"\1://[redacted]@", text)
     text = JWT_RE.sub("[token]", text)
     text = TOKEN_RE.sub(r"\1[redacted]", text)
+    text = BEARER_RE.sub(r"\1[redacted]", text)
     return CODE_RE.sub("[code]", text)
 
 
@@ -184,11 +186,21 @@ class Registration:
         self.payload = payload
         self.code_waiter: Optional[asyncio.Future[str]] = None
         self.context: Any = None
+        self.log_tasks: set[asyncio.Task[None]] = set()
         self.secrets = [str(payload[key]) for key in ("email", "password", "proxy") if payload.get(key)]
 
     async def log(self, text: str) -> None:
         clean = redact_sensitive(text, self.secrets)
         await self.writer.send(message("log", self.request_id, level="info", message=clean))
+
+    def schedule_log(self, text: str) -> None:
+        self.log_tasks.add(asyncio.create_task(self.log(text)))
+
+    async def flush_logs(self) -> None:
+        while self.log_tasks:
+            tasks = tuple(self.log_tasks)
+            self.log_tasks.difference_update(tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def request_code(self, attempt: int) -> str:
         if self.code_waiter is not None:
@@ -223,9 +235,9 @@ class Registration:
             clip = scaled_clip(size, factor)
             png = await page.screenshot(type="png", clip=clip, mask=masks, animations="disabled")
 
-    async def registration_loop(self, context: Any) -> None:
+    async def registration_loop(self, context: Any) -> Any:
         flow = RegistrationFlow(self.payload, self.request_code, self.log)
-        await flow.run(context)
+        return await flow.run(context)
 
 
 def scaled_clip(size: Mapping[str, Any], factor: float) -> dict[str, int]:
@@ -238,7 +250,7 @@ def scaled_clip(size: Mapping[str, Any], factor: float) -> dict[str, int]:
 
 
 async def launch_context(registration: Registration, profile: Path) -> Any:
-    options: dict[str, Any] = {"headless": registration.payload["headless"]}
+    options: dict[str, Any] = {"headless": registration.payload["headless"], "humanize": True}
     if registration.payload["proxy"]:
         options.update(proxy=registration.payload["proxy"], geoip=True)
     launch_task = asyncio.create_task(load_launcher()(str(profile), **options))
@@ -277,21 +289,38 @@ def close_late_context(registration: Registration, task: asyncio.Task[Any]) -> N
         pass
 
 
+async def route_without_images(route: Any, request: Any) -> None:
+    if request.resource_type == "image":
+        await route.abort()
+        return
+    await route.continue_()
+
+
+async def block_images(context: Any) -> None:
+    await context.route("**/*", route_without_images)
+
+
 async def browse(registration: Registration) -> str:
     root = Path(__file__).resolve().parents[2] / ".cloakbrowser-profiles"
     root.mkdir(exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix=f"task-{registration.request_id[:12]}-", dir=root))
     try:
         context = await launch_context(registration, profile)
+        await block_images(context)
+        context.on("response", lambda response: observe_response(registration, response))
+        context.on("requestfailed", lambda request: observe_request_failure(registration, request))
         page = context.pages[-1] if context.pages else await context.new_page()
         await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=120000)
         await registration.log("registration page loaded")
-        await registration.registration_loop(context)
-        page, _, _ = await inspect_context(context)
-        token = await read_access_token(page)
+        page = await registration.registration_loop(context)
+        await registration.log("login detected; reading session in current page")
+        token = await read_access_token(page, registration.log)
         registration.secrets.append(token)
+        await registration.log("session token acquired")
         return token
-    except SidecarError:
+    except asyncio.CancelledError:
+        raise
+    except Exception:
         if registration.context is not None:
             await emit_screenshot(registration)
         raise
@@ -309,6 +338,7 @@ async def close_context(registration: Registration) -> None:
     done, _ = await asyncio.wait((close_task,), timeout=1.0)
     if not done:
         close_task.cancel()
+        await asyncio.gather(close_task, return_exceptions=True)
         diagnostic("context close timed out", TimeoutError(), registration.secrets)
         return
     try:
@@ -318,21 +348,34 @@ async def close_context(registration: Registration) -> None:
             diagnostic("context close failed", exc, registration.secrets)
 
 
-async def read_access_token(page: Any) -> str:
-    response = await page.goto(SESSION_URL, wait_until="domcontentloaded", timeout=60000)
-    if response is None or not response.ok:
-        raise SidecarError("session_invalid", "session endpoint returned an error", True)
-    body = await page.locator("body").inner_text(timeout=15000)
-    try:
-        session = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise SidecarError("session_invalid", "session endpoint did not return JSON", True) from exc
-    if not isinstance(session, dict):
-        raise SidecarError("session_invalid", "session endpoint did not return an object", True)
-    token = session.get("accessToken")
-    if not isinstance(token, str) or not token.strip():
-        raise SidecarError("access_token_missing", "session response is missing accessToken", True)
-    return token.strip()
+async def read_access_token(page: Any, log: Optional[Callable[[str], Awaitable[None]]] = None) -> str:
+    last_error = SidecarError("access_token_missing", "session response is missing accessToken", True)
+    for attempt in range(8):
+        try:
+            response = await page.goto(SESSION_URL, wait_until="domcontentloaded", timeout=15000)
+            if response is None or not response.ok:
+                raise SidecarError("session_invalid", "session endpoint returned an error", True)
+            body = await page.locator("body").inner_text(timeout=10000)
+            session = json.loads(body)
+            if not isinstance(session, dict):
+                raise SidecarError("session_invalid", "session endpoint did not return an object", True)
+            token = session.get("accessToken")
+            if not isinstance(token, str) or not token.strip():
+                raise SidecarError("access_token_missing", "session response is missing accessToken", True)
+            return token.strip()
+        except asyncio.CancelledError:
+            raise
+        except json.JSONDecodeError:
+            last_error = SidecarError("session_invalid", "session endpoint did not return JSON", True)
+        except SidecarError as exc:
+            last_error = exc
+        except Exception:
+            last_error = SidecarError("session_invalid", "session endpoint request failed", True)
+        if attempt < 7:
+            if log is not None:
+                await log(f"session token not ready; retrying ({attempt + 2}/8)")
+            await asyncio.sleep(min(2 + attempt, 5))
+    raise last_error
 
 
 async def emit_screenshot(registration: Registration) -> None:
@@ -357,17 +400,72 @@ def diagnostic(prefix: str, exc: BaseException, secrets: Sequence[str] = ()) -> 
     sys.stderr.flush()
 
 
+def safe_network_path(value: str) -> str:
+    path = urlsplit(value).path or "/"
+    return path.replace("token", "tkn").replace("bearer", "auth")[:300]
+
+
+def network_response_message(response: Any) -> Optional[str]:
+    request = response.request
+    parsed = urlsplit(response.url)
+    host = (parsed.hostname or "").lower()
+    relevant = host == "auth.openai.com" or host == "chatgpt.com" or host.endswith(".chatgpt.com")
+    auth_path = parsed.path.startswith((
+        "/api/auth/", "/api/accounts/", "/email-verification", "/backend-anon/"
+    )) or parsed.path == "/ces/v1/rgstr"
+    if not relevant or (request.resource_type != "document" and not auth_path and response.status < 400):
+        return None
+    message = f"network {request.resource_type} {request.method} host={host} path={safe_network_path(response.url)} status={response.status}"
+    location = response.headers.get("location", "")
+    if location:
+        redirect = urlsplit(location)
+        message += f" redirect_host={(redirect.hostname or '').lower()} redirect_path={safe_network_path(location)}"
+    return message
+
+
+def network_failure_message(request: Any) -> Optional[str]:
+    if request.resource_type == "image":
+        return None
+    parsed = urlsplit(request.url)
+    host = (parsed.hostname or "").lower()
+    if host != "auth.openai.com" and host != "chatgpt.com" and not host.endswith(".chatgpt.com"):
+        return None
+    return f"network failure {request.resource_type} {request.method} host={host} path={safe_network_path(request.url)} reason={request.failure}"
+
+
+def observe_response(registration: Registration, response: Any) -> None:
+    try:
+        message = network_response_message(response)
+        if message:
+            registration.schedule_log(message)
+    except Exception:
+        pass
+
+
+def observe_request_failure(registration: Registration, request: Any) -> None:
+    try:
+        message = network_failure_message(request)
+        if message:
+            registration.schedule_log(message)
+    except Exception:
+        pass
+
+
 async def read_line() -> bytes:
     loop = asyncio.get_running_loop()
     future: asyncio.Future[bytes] = loop.create_future()
+
+    def settle(method: Callable[..., None], value: Any) -> None:
+        if not future.done():
+            method(value)
 
     def read_stdin() -> None:
         try:
             line = sys.stdin.buffer.readline()
         except (OSError, ValueError) as exc:
-            loop.call_soon_threadsafe(future.set_exception, exc)
+            loop.call_soon_threadsafe(settle, future.set_exception, exc)
         else:
-            loop.call_soon_threadsafe(future.set_result, line)
+            loop.call_soon_threadsafe(settle, future.set_result, line)
 
     threading.Thread(target=read_stdin, daemon=True).start()
     return await future
@@ -426,16 +524,23 @@ async def protocol_main(writer: JsonWriter) -> int:
         registration = Registration(writer, request_id, validate_start(raw))
         await writer.send(message("ready", request_id))
         token = await run_registration(registration)
+        await registration.flush_logs()
         await writer.send(message("result", request_id, access_token=token))
         return 0
     except asyncio.CancelledError:
+        if registration is not None:
+            await registration.flush_logs()
         await send_error(writer, request_id, "cancelled", "request cancelled", False)
         return 2
     except SidecarError as exc:
+        if registration is not None:
+            await registration.flush_logs()
         secrets = registration.secrets if registration else ()
         await send_error(writer, request_id, exc.code, redact_sensitive(exc.message, secrets), exc.retryable)
         return 2
     except Exception as exc:
+        if registration is not None:
+            await registration.flush_logs()
         secrets = registration.secrets if registration else ()
         diagnostic("sidecar failure", exc, secrets)
         await send_error(writer, request_id, "browser_error", "browser operation failed", True)

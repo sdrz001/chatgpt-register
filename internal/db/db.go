@@ -1,6 +1,7 @@
 package db
 
 import (
+	"chatgpt-register/internal/categorysync"
 	"chatgpt-register/internal/emailalias"
 	"chatgpt-register/internal/models"
 
@@ -20,6 +21,7 @@ func Init(path string) (*gorm.DB, error) {
 	reclaimOrphanRegistering(db)
 	reclaimOrphanIntegrations(db)
 	backfillRegistrationMailboxIDs(db)
+	categorysync.BackfillRegistrations(db)
 	return db, nil
 }
 

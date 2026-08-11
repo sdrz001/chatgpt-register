@@ -62,6 +62,31 @@ func TestNormalizeBackend(t *testing.T) {
 	}
 }
 
+func TestRedactSensitiveKeepsAuthHostsAndMasksLongJWT(t *testing.T) {
+	jwt := "abc." + strings.Repeat("p", 16) + "." + strings.Repeat("s", 8)
+	clean := redactSensitive("host=auth.openai.com host=chatgpt.com token="+jwt, Input{}, "", "")
+	if !strings.Contains(clean, "auth.openai.com") || !strings.Contains(clean, "chatgpt.com") {
+		t.Fatalf("auth hosts were redacted: %s", clean)
+	}
+	if strings.Contains(clean, jwt) || (!strings.Contains(clean, "[token]") && !strings.Contains(clean, "[redacted]")) {
+		t.Fatalf("JWT was not redacted: %s", clean)
+	}
+}
+
+func TestRedactSensitiveKeepsNaturalTokenLogsAndMasksCredentials(t *testing.T) {
+	status := "session token acquired; accessToken plan=free"
+	if clean := redactSensitive(status, Input{}, "", ""); clean != status {
+		t.Fatalf("natural status log was redacted: %q", clean)
+	}
+	clean := redactSensitive("access_token=secret-value; Bearer bearer-value", Input{}, "", "")
+	if strings.Contains(clean, "secret-value") || strings.Contains(clean, "bearer-value") {
+		t.Fatalf("credential leaked: %s", clean)
+	}
+	if clean != "access_token=[redacted]; Bearer [redacted]" {
+		t.Fatalf("unexpected credential redaction: %q", clean)
+	}
+}
+
 func TestSidecarSuccessAndRedaction(t *testing.T) {
 	var logs []string
 	in := sidecarTestInput(t, "success")
@@ -181,6 +206,20 @@ func TestResolveSidecarCommand(t *testing.T) {
 	})
 }
 
+func TestSidecarNormalizesInvalidUTF8(t *testing.T) {
+	var logs []string
+	session := sidecarSession{input: Input{Log: func(format string, a ...any) {
+		logs = append(logs, fmt.Sprintf(format, a...))
+	}}}
+	_, err := session.handle(sidecarMessage{Type: "log", Message: "update \xa1\xfa available"})
+	if err != nil {
+		t.Fatalf("handle() error: %v", err)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "update � available") {
+		t.Fatalf("normalized log=%q", logs)
+	}
+}
+
 func TestSidecarOversizedScreenshot(t *testing.T) {
 	encoded := base64.StdEncoding.EncodeToString(make([]byte, sidecarScreenshotLimit+1))
 	_, err := decodeSidecarScreenshot(encoded)
@@ -246,6 +285,9 @@ func runSidecarHelper(mode string) error {
 	}
 	if os.Getenv("CODEXREG_TEST_LICENSE") != "inherited-license" {
 		return errors.New("license environment was not inherited")
+	}
+	if os.Getenv("PYTHONIOENCODING") != "utf-8" || os.Getenv("PYTHONUTF8") != "1" {
+		return errors.New("UTF-8 sidecar environment was not configured")
 	}
 	var start sidecarStartMessage
 	if err := json.Unmarshal(scanner.Bytes(), &start); err != nil {

@@ -20,7 +20,20 @@ import (
 // ErrAccountTaken 注册时提示"账号不存在或已被删除/停用"，视为该地址已被注册，不应重试。
 var ErrAccountTaken = errors.New("账号不存在或已被删除/停用")
 
-const registrationSuccessHold = 5 * time.Second
+const registrationSuccessHold = 0 * time.Second
+
+func registrationLauncher(headless bool) *launcher.Launcher {
+	return launcher.New().
+		Headless(headless).
+		NoSandbox(true).
+		Set("disable-dev-shm-usage").
+		Append("--disable-blink-features", "AutomationControlled").
+		Append("--disable-infobars", "").
+		Append("--no-first-run", "").
+		Append("--no-default-browser-check", "").
+		Append("--blink-settings", "imagesEnabled=false").
+		Append("--window-size", "1280,800")
+}
 
 // registerBrowser 启动浏览器完成 ChatGPT 账号注册并返回 accessToken。
 // in.Proxy 为空则直连；非空时 Chrome 走该代理，并按出口 IP 做 GeoIP 对齐。
@@ -28,15 +41,7 @@ func registerBrowser(ctx context.Context, in Input) (token string, err error) {
 	in.logf("🚀 启动浏览器自动化注册流程...")
 
 	// 1. 启动 Chrome，禁用自动化特征
-	l := launcher.New().
-		Headless(in.Headless).
-		NoSandbox(true).
-		Set("disable-dev-shm-usage").
-		Append("--disable-blink-features", "AutomationControlled").
-		Append("--disable-infobars", "").
-		Append("--no-first-run", "").
-		Append("--no-default-browser-check", "").
-		Append("--window-size", "1280,800")
+	l := registrationLauncher(in.Headless)
 
 	// 1.1 挂代理（账号密码交给 HandleAuth）
 	var proxyUser, proxyPass string
@@ -335,7 +340,7 @@ func registerBrowser(ctx context.Context, in Input) (token string, err error) {
 	if !ok || accessToken == "" {
 		return "", fmt.Errorf("未找到 accessToken，可能未登录成功")
 	}
-	in.logf("🔑 accessToken 获取成功，浏览器将在 %d 秒后关闭", int(registrationSuccessHold/time.Second))
+	in.logf("🔑 accessToken 获取成功，正在关闭浏览器")
 	waitRegistrationSuccessHold(ctx, registrationSuccessHold)
 	return accessToken, nil
 }
@@ -621,10 +626,16 @@ func registrationBirthdate(age string, now time.Time) string {
 }
 
 func replaceRegistrationInput(input *rod.Element, value string) error {
-	if err := input.SelectAllText(); err != nil {
-		return err
-	}
-	return input.Input(value)
+	_, err := input.Eval(`(value) => {
+		const prototype = this instanceof HTMLTextAreaElement
+			? HTMLTextAreaElement.prototype
+			: HTMLInputElement.prototype;
+		const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
+		setter.call(this, value);
+		this.dispatchEvent(new Event('input', { bubbles: true }));
+		this.dispatchEvent(new Event('change', { bubbles: true }));
+	}`, value)
+	return err
 }
 
 func visibleRegistrationElement(page *rod.Page, selector string) (*rod.Element, error) {
