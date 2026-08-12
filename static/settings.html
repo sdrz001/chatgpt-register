@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>系统设置 · ChatGPT 注册管理</title>
-<link rel="stylesheet" href="/static/style.css?v=18">
+<link rel="stylesheet" href="/static/style.css?v=19">
 </head>
 <body data-page="settings">
 <div class="layout">
@@ -113,6 +113,44 @@
               <span id="proxy-count" class="count-badge">识别到 0 个代理</span>
             </div>
             <span class="field-hint">每行一个，支持 user:pass@host:port、host:port:user:pass、host:port，以及带 http(s)://、https:// 或 socks5:// 前缀的格式</span>
+            <!-- 批量生成工具 -->
+            <div class="proxy-gen-panel">
+              <button class="proxy-gen-toggle px-btn ghost" type="button" onclick="toggleProxyGen(this)" aria-expanded="false">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;flex-shrink:0"><polyline points="6 9 12 15 18 9"/></svg>
+                批量生成（动态 region / sid）
+              </button>
+              <div class="proxy-gen-body" style="display:none">
+                <div class="proxy-gen-row">
+                  <div class="field" style="flex:1;margin:0">
+                    <label>模板代理</label>
+                    <span class="field-hint">把需要随机的部分写成 <code>-region-XX</code>、<code>-sid-XXXX</code>、<code>-t-N</code>；其余原样保留</span>
+                    <input id="gen-template" class="px-input" type="text" autocomplete="off" spellcheck="false"
+                      placeholder="prefix-region-US-sid-sBMFfSHx-t-5:pass@host:port">
+                  </div>
+                </div>
+                <div class="proxy-gen-row proxy-gen-options">
+                  <div class="field" style="margin:0">
+                    <label>生成数量</label>
+                    <input id="gen-count" class="px-input" type="number" min="1" max="5000" value="10" style="width:90px">
+                  </div>
+                  <div class="field" style="flex:1;margin:0">
+                    <label>region 列表</label>
+                    <span class="field-hint">逗号分隔，留空则只用模板 region</span>
+                    <input id="gen-regions" class="px-input" type="text" autocomplete="off" placeholder="US,JP,SG,DE,GB">
+                  </div>
+                  <div class="field" style="margin:0">
+                    <label>sid 长度</label>
+                    <span class="field-hint">0=跟随模板</span>
+                    <input id="gen-sid-len" class="px-input" type="number" min="0" max="32" value="0" style="width:72px">
+                  </div>
+                </div>
+                <div class="proxy-gen-foot">
+                  <button class="px-btn primary" type="button" onclick="generateProxies()">生成并追加</button>
+                  <span id="gen-preview" class="gen-preview-hint"></span>
+                </div>
+              </div>
+            </div>
+            <!-- /批量生成 -->
             <textarea id="set-proxy-list" class="px-input proxy-textarea" rows="8" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" oninput="updateProxyCount()" placeholder="user:pass@1.2.3.4:8080&#10;1.2.3.4:8080:user:pass&#10;http://user:pass@1.2.3.4:8080"></textarea>
           </div>
           <div id="proxy-test-result" class="proxy-result" style="display:none"></div>
@@ -659,6 +697,76 @@ async function changePassword() {
   document.getElementById('pw-new').value = '';
   document.getElementById('pw-new2').value = '';
   toast('密码已修改');
+}
+
+function toggleProxyGen(btn) {
+  const body = btn.closest('.proxy-gen-panel').querySelector('.proxy-gen-body');
+  const open = body.style.display === 'none';
+  body.style.display = open ? '' : 'none';
+  btn.setAttribute('aria-expanded', String(open));
+  btn.querySelector('svg').style.transform = open ? 'rotate(180deg)' : '';
+}
+
+/* ===== 批量生成动态代理 ===== */
+function _randStr(len, charset) {
+  let out = '';
+  for (let i = 0; i < len; i++) out += charset[Math.floor(Math.random() * charset.length)];
+  return out;
+}
+function _sidCharset(sample) {
+  const hasLetter = /[a-zA-Z]/.test(sample);
+  const hasDigit  = /[0-9]/.test(sample);
+  if (hasLetter && hasDigit) return 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  if (hasLetter)             return 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  return '0123456789';
+}
+function generateProxies() {
+  const tpl    = document.getElementById('gen-template').value.trim();
+  const count  = Math.max(1, Math.min(5000, parseInt(document.getElementById('gen-count').value, 10) || 10));
+  const sidLen = parseInt(document.getElementById('gen-sid-len').value, 10) || 0;
+  const regionRaw = document.getElementById('gen-regions').value.trim();
+  const hint   = document.getElementById('gen-preview');
+
+  if (!tpl) { toast('请先填写模板代理', true); return; }
+
+  // 解析 region
+  const regionMatch = tpl.match(/-region-([A-Za-z0-9]+)/i);
+  const tplRegion   = regionMatch ? regionMatch[1] : null;
+  const regions     = regionRaw
+    ? regionRaw.split(',').map(s => s.trim()).filter(Boolean)
+    : (tplRegion ? [tplRegion] : null);
+
+  // 解析 sid
+  const sidMatch = tpl.match(/-sid-([A-Za-z0-9]+)/i);
+  const tplSid   = sidMatch ? sidMatch[1] : null;
+  const charset  = tplSid ? _sidCharset(tplSid) : null;
+  const finalLen = sidLen > 0 ? sidLen : (tplSid ? tplSid.length : 8);
+
+  const lines = [];
+  for (let i = 0; i < count; i++) {
+    let line = tpl;
+    // 替换 region
+    if (regions) {
+      const r = regions[Math.floor(Math.random() * regions.length)];
+      line = line.replace(/-region-[A-Za-z0-9]+/i, '-region-' + r);
+    }
+    // 替换 sid
+    if (charset) {
+      const newSid = _randStr(finalLen, charset);
+      line = line.replace(/-sid-[A-Za-z0-9]+/i, '-sid-' + newSid);
+    }
+    // 替换 t（隧道号），1-99
+    line = line.replace(/-t-\d+/i, '-t-' + (Math.floor(Math.random() * 99) + 1));
+    lines.push(line);
+  }
+
+  const ta = document.getElementById('set-proxy-list');
+  const existing = ta.value.trimEnd();
+  ta.value = existing ? existing + '\n' + lines.join('\n') : lines.join('\n');
+  updateProxyCount();
+  hint.textContent = '已追加 ' + lines.length + ' 条';
+  setTimeout(() => { hint.textContent = ''; }, 3000);
+  toast('已生成并追加 ' + lines.length + ' 条代理');
 }
 
 Promise.all([loadSMSMeta().then(loadSettings), loadProxyPools()]);
