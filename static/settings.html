@@ -720,6 +720,23 @@ function _sidCharset(sample) {
   if (hasLetter)             return 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
   return '0123456789';
 }
+
+// 统一匹配 -key- 和 _key_ 两种分隔风格
+function _proxyParam(tpl, keys) {
+  for (const key of keys) {
+    const m = tpl.match(new RegExp('([_-])(' + key + ')([_-])([A-Za-z0-9]+)', 'i'));
+    if (m) return { sep: m[1], key: m[2], value: m[4], re: new RegExp('[_-]' + key + '[_-][A-Za-z0-9]+', 'i') };
+  }
+  return null;
+}
+function _proxyParamInt(tpl, keys) {
+  for (const key of keys) {
+    const m = tpl.match(new RegExp('([_-])(' + key + ')([_-])(\\d+)', 'i'));
+    if (m) return { sep: m[1], key: m[2], value: parseInt(m[4], 10), re: new RegExp('[_-]' + key + '[_-]\\d+', 'i') };
+  }
+  return null;
+}
+
 function generateProxies() {
   const tpl    = document.getElementById('gen-template').value.trim();
   const count  = Math.max(1, Math.min(5000, parseInt(document.getElementById('gen-count').value, 10) || 10));
@@ -729,34 +746,40 @@ function generateProxies() {
 
   if (!tpl) { toast('请先填写模板代理', true); return; }
 
-  // 解析 region
-  const regionMatch = tpl.match(/-region-([A-Za-z0-9]+)/i);
-  const tplRegion   = regionMatch ? regionMatch[1] : null;
-  const regions     = regionRaw
+  // 解析 region / zone（支持 - 和 _ 两种分隔符，支持 region/zone 别名）
+  const zoneParam = _proxyParam(tpl, ['region', 'zone', 'country', 'area']);
+  const tplRegion = zoneParam ? zoneParam.value : null;
+  const regions   = regionRaw
     ? regionRaw.split(',').map(s => s.trim()).filter(Boolean)
     : (tplRegion ? [tplRegion] : null);
 
-  // 解析 sid
-  const sidMatch = tpl.match(/-sid-([A-Za-z0-9]+)/i);
-  const tplSid   = sidMatch ? sidMatch[1] : null;
+  // 解析 sid（支持 - 和 _ 两种分隔符）
+  const sidParam = _proxyParam(tpl, ['sid', 'session', 'sessid']);
+  const tplSid   = sidParam ? sidParam.value : null;
   const charset  = tplSid ? _sidCharset(tplSid) : null;
   const finalLen = sidLen > 0 ? sidLen : (tplSid ? tplSid.length : 8);
+
+  // 解析 time / t（线程/隧道参数）
+  const timeParam = _proxyParamInt(tpl, ['time', 't', 'ttl', 'thread']);
 
   const lines = [];
   for (let i = 0; i < count; i++) {
     let line = tpl;
-    // 替换 region
-    if (regions) {
+    // 替换 zone/region
+    if (regions && zoneParam) {
       const r = regions[Math.floor(Math.random() * regions.length)];
-      line = line.replace(/-region-[A-Za-z0-9]+/i, '-region-' + r);
+      line = line.replace(zoneParam.re, zoneParam.sep + zoneParam.key + zoneParam.sep + r);
     }
     // 替换 sid
-    if (charset) {
+    if (charset && sidParam) {
       const newSid = _randStr(finalLen, charset);
-      line = line.replace(/-sid-[A-Za-z0-9]+/i, '-sid-' + newSid);
+      line = line.replace(sidParam.re, sidParam.sep + sidParam.key + sidParam.sep + newSid);
     }
-    // 替换 t（隧道号），1-99
-    line = line.replace(/-t-\d+/i, '-t-' + (Math.floor(Math.random() * 99) + 1));
+    // 替换 time/t（1-99）
+    if (timeParam) {
+      const newT = Math.floor(Math.random() * 99) + 1;
+      line = line.replace(timeParam.re, timeParam.sep + timeParam.key + timeParam.sep + newT);
+    }
     lines.push(line);
   }
 
