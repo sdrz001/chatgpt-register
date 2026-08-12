@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-func TestRegistrationLauncherDisablesImages(t *testing.T) {
+func TestRegistrationLauncherLoadsAllResources(t *testing.T) {
 	launcher := registrationLauncher(true)
-	if value := launcher.Get("blink-settings"); value != "imagesEnabled=false" {
+	if value := launcher.Get("blink-settings"); value != "" {
 		t.Fatalf("blink-settings=%q", value)
 	}
 }
@@ -23,6 +23,7 @@ func TestClassifyRegistrationPage(t *testing.T) {
 		{name: "disabled", signals: registrationPageSignals{HasReady: true, Body: "Your account has been deleted or deactivated"}, want: registrationStateDisabled},
 		{name: "retry before ready URL", signals: registrationPageSignals{URL: "https://chatgpt.com/", HasRetry: true}, want: registrationStateRetry},
 		{name: "profile birthdate", signals: registrationPageSignals{HasName: true, ProfileField: "birthdate", HasEmail: true}, want: registrationStateProfile},
+		{name: "profile segmented birthdate", signals: registrationPageSignals{HasName: true, ProfileField: "birthdate_segments", ProfileValue: "2026-08-12"}, want: registrationStateProfile},
 		{name: "password", signals: registrationPageSignals{HasPassword: true, HasEmail: true}, want: registrationStatePassword},
 		{name: "invalid code", signals: registrationPageSignals{HasCode: true, HasEmail: true, Body: "Invalid code"}, want: registrationStateCodeRejected},
 		{name: "invalid Japanese code", signals: registrationPageSignals{HasCode: true, Body: "認証コードが正しくありません"}, want: registrationStateCodeRejected},
@@ -40,6 +41,38 @@ func TestClassifyRegistrationPage(t *testing.T) {
 				t.Fatalf("classifyRegistrationPage(%+v)=%q want %q", test.signals, got, test.want)
 			}
 		})
+	}
+}
+
+func TestRegistrationProfileValueSupportsAgeAndBirthdateTemplates(t *testing.T) {
+	now := time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		meta  registrationInputMeta
+		field string
+		value string
+	}{
+		{name: "legacy age", meta: registrationInputMeta{Name: "age", Type: "text", Value: "30"}, field: "age", value: "35"},
+		{name: "native date", meta: registrationInputMeta{Type: "date", AriaLabel: "Birth date"}, field: "birthdate", value: "1991-08-12"},
+		{name: "localized date", meta: registrationInputMeta{Type: "text", Placeholder: "出生日期", Value: "2026/08/12"}, field: "birthdate", value: "1991/08/12"},
+		{name: "US date", meta: registrationInputMeta{Type: "text", Placeholder: "MM/DD/YYYY", Value: "08/12/2026"}, field: "birthdate", value: "08/12/1991"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			field, value := registrationProfileValue("35", test.meta, now)
+			if field != test.field || value != test.value {
+				t.Fatalf("field/value=%q/%q want %q/%q", field, value, test.field, test.value)
+			}
+		})
+	}
+}
+
+func TestRegistrationBirthdateSegments(t *testing.T) {
+	values := registrationBirthdateSegments("1991-08-12")
+	for kind, want := range map[string]string{"year": "1991", "month": "08", "day": "12"} {
+		if values[kind] != want {
+			t.Fatalf("segment %s=%q want %q", kind, values[kind], want)
+		}
 	}
 }
 
@@ -78,14 +111,14 @@ func TestRegistrationPageDiagnosticRedactsSensitiveValues(t *testing.T) {
 	diagnostic := registrationPageDiagnostic(registrationPageSignals{
 		URL:   "https://chatgpt.com/auth/login?email=person@example.test&code=123456",
 		Title: "Verify person@example.test",
-		Body:  "Use code 123456 or call +12025550123",
+		Body:  "Use code 123456, birthday 1991 / 02 / 03, or call +12025550123",
 	})
-	for _, secret := range []string{"person@example.test", "123456", "+12025550123", "?email="} {
+	for _, secret := range []string{"person@example.test", "123456", "1991 / 02 / 03", "+12025550123", "?email="} {
 		if strings.Contains(diagnostic, secret) {
 			t.Fatalf("diagnostic leaked %q: %s", secret, diagnostic)
 		}
 	}
-	for _, expected := range []string{"https://chatgpt.com/auth/login", "[email]", "[code]", "[number]"} {
+	for _, expected := range []string{"https://chatgpt.com/auth/login", "[email]", "[code]", "[date]", "[number]"} {
 		if !strings.Contains(diagnostic, expected) {
 			t.Fatalf("diagnostic missing %q: %s", expected, diagnostic)
 		}

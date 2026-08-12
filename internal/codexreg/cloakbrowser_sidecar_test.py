@@ -126,25 +126,6 @@ class ProtocolTests(unittest.TestCase):
 
 
 class LaunchTests(unittest.IsolatedAsyncioTestCase):
-    async def test_image_routes_are_aborted(self):
-        route = mock.AsyncMock()
-        request = mock.MagicMock(resource_type="image")
-        await sidecar.route_without_images(route, request)
-        route.abort.assert_awaited_once_with()
-        route.continue_.assert_not_awaited()
-
-    async def test_non_image_routes_continue(self):
-        route = mock.AsyncMock()
-        request = mock.MagicMock(resource_type="xhr")
-        await sidecar.route_without_images(route, request)
-        route.continue_.assert_awaited_once_with()
-        route.abort.assert_not_awaited()
-
-    async def test_block_images_installs_context_route(self):
-        context = mock.AsyncMock()
-        await sidecar.block_images(context)
-        context.route.assert_awaited_once_with("**/*", sidecar.route_without_images)
-
     async def test_launch_context_enables_humanized_input(self):
         payload = {
             "email": "person@example.test",
@@ -224,15 +205,24 @@ class ClassificationTests(unittest.TestCase):
         base.password = False
         self.assertEqual(sidecar.classify_page(base), "code_rejected")
 
-    def test_disabled_and_japanese_challenge_text(self):
+    def test_disabled_and_localized_challenge_text(self):
         self.assertEqual(sidecar.classify_page(sidecar.Signals(body="账号已停用")), "disabled")
         self.assertEqual(sidecar.classify_page(sidecar.Signals(body="人間であることを確認")), "challenge")
+        self.assertEqual(
+            sidecar.classify_page(sidecar.Signals(body="验证成功。正在等待 chatgpt.com 响应")),
+            "challenge",
+        )
 
     def test_localized_age_selector_and_challenge_priority(self):
         flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
         self.assertIn("input[placeholder='年龄']", flow_module.PROFILE)
         signals = sidecar.Signals(name=True, profile_field="age", challenge=True)
         self.assertEqual(sidecar.classify_page(signals), "challenge")
+        segmented = sidecar.Signals(
+            url="https://auth.openai.com/about-you", name=True,
+            profile_field="birthdate_segments", profile_value="2026-08-12",
+        )
+        self.assertEqual(sidecar.classify_page(segmented), "profile")
 
     def test_ready_url_requires_clean_chat_page(self):
         self.assertTrue(sidecar.ready_url("https://chatgpt.com/", sidecar.Signals()))
@@ -363,9 +353,11 @@ class SanitizingAndMessageTests(unittest.TestCase):
         self.assertNotIn("bearer-value", clean)
         self.assertEqual(clean, "access_token=[redacted]; Bearer [redacted]")
 
-    def test_blocked_image_failure_is_not_logged(self):
-        request = mock.MagicMock(resource_type="image")
-        self.assertIsNone(sidecar.network_failure_message(request))
+    def test_redaction_masks_birthdate_formats(self):
+        clean = sidecar.redact_sensitive("birthdates 1991-02-03 1991/02/03 02/03/1991 1991 / 02 / 03")
+        for value in ("1991-02-03", "1991/02/03", "02/03/1991", "1991 / 02 / 03"):
+            self.assertNotIn(value, clean)
+        self.assertEqual(clean.count("[date]"), 4)
 
     def test_network_diagnostic_keeps_safe_redirect_chain(self):
         response = mock.MagicMock()
@@ -476,19 +468,124 @@ class InputFlowTests(unittest.IsolatedAsyncioTestCase):
         field = mock.AsyncMock()
         field.get_attribute.side_effect = ["", "birthdate-input", "text", "bday", "生日日期", "出生日期"]
         field.input_value.return_value = "1991-02-03"
-        with mock.patch.object(flow_module, "birthdate_from_age", return_value="1991-02-03"):
-            await flow_module.fill_profile_field(field, "35")
+        with mock.patch.object(flow_module, "birthdate_from_age", return_value="1991-02-03"), mock.patch.object(
+            flow_module.asyncio, "sleep", new=mock.AsyncMock()
+        ):
+            value = await flow_module.fill_profile_field(field, "35")
+        self.assertEqual(value, "1991-02-03")
         field.evaluate.assert_awaited_once()
         self.assertEqual(field.evaluate.await_args.args[1], "1991-02-03")
         field.fill.assert_not_awaited()
         field.dispatch_event.assert_not_awaited()
         field.blur.assert_awaited_once()
 
+    async def test_localized_birthdate_recovers_after_controlled_input_rollback(self):
+        flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        field = mock.AsyncMock()
+        attributes = {
+            "name": "", "id": "", "type": "text", "autocomplete": "",
+            "placeholder": "出生日期", "aria-label": "出生日期",
+        }
+        field.get_attribute.side_effect = lambda key: attributes[key]
+        field.input_value.side_effect = ["2026/08/12", "2026/08/12", "1991/02/03"]
+        with mock.patch.object(flow_module, "birthdate_from_age", return_value="1991-02-03"), mock.patch.object(
+            flow_module.asyncio, "sleep", new=mock.AsyncMock()
+        ):
+            value = await flow_module.fill_profile_field(field, "35")
+        self.assertEqual(value, "1991/02/03")
+        self.assertEqual(field.evaluate.await_args.args[1], "1991/02/03")
+        field.fill.assert_awaited_once_with("1991/02/03")
+        self.assertEqual(field.blur.await_count, 2)
+
+    async def test_segmented_birthdate_fills_year_month_day(self):
+        flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        segments = [mock.AsyncMock() for _ in range(3)]
+        values = {"year": "1991", "month": "08", "day": "12"}
+        for segment, kind in zip(segments, ("year", "month", "day")):
+            segment.get_attribute.side_effect = lambda key, kind=kind: kind if key == "data-type" else ""
+            segment.get_by_kind = kind
+        locator = mock.MagicMock()
+        locator.count = mock.AsyncMock(return_value=3)
+        locator.nth.side_effect = segments
+        group = mock.MagicMock()
+        group.is_visible = mock.AsyncMock(return_value=True)
+        group.locator.return_value = locator
+        groups = mock.MagicMock()
+        groups.count = mock.AsyncMock(return_value=1)
+        groups.nth.return_value = group
+        page = mock.MagicMock()
+        page.locator.return_value = groups
+        with mock.patch.object(flow_module, "birthdate_from_age", return_value="1991-08-12"), mock.patch.object(
+            flow_module, "fill_date_segment", new=mock.AsyncMock()
+        ) as fill_segment, mock.patch.object(
+            flow_module, "date_segment_value", new=mock.AsyncMock(side_effect=["1991", "08", "12"])
+        ):
+            value = await flow_module.fill_segmented_birthdate(page, "35")
+        self.assertEqual(value, "1991-08-12")
+        self.assertEqual(
+            fill_segment.await_args_list,
+            [mock.call(segment, values[segment.get_by_kind]) for segment in segments],
+        )
+
+    async def test_segmented_birthdate_uses_localized_labels(self):
+        flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        segments = [mock.AsyncMock() for _ in range(3)]
+        labels = ("年", "月", "日")
+        for segment, label in zip(segments, labels):
+            segment.get_attribute.side_effect = lambda key, label=label: label if key == "aria-label" else ""
+        locator = mock.MagicMock()
+        locator.count = mock.AsyncMock(return_value=3)
+        locator.nth.side_effect = segments
+        group = mock.MagicMock()
+        group.is_visible = mock.AsyncMock(return_value=True)
+        group.locator.return_value = locator
+        groups = mock.MagicMock()
+        groups.count = mock.AsyncMock(return_value=1)
+        groups.nth.return_value = group
+        page = mock.MagicMock()
+        page.locator.return_value = groups
+        with mock.patch.object(flow_module, "birthdate_from_age", return_value="1991-08-12"), mock.patch.object(
+            flow_module, "fill_date_segment", new=mock.AsyncMock()
+        ) as fill_segment, mock.patch.object(
+            flow_module, "date_segment_value", new=mock.AsyncMock(side_effect=["1991", "08", "12"])
+        ):
+            await flow_module.fill_segmented_birthdate(page, "35")
+        self.assertEqual(
+            [item.args[1] for item in fill_segment.await_args_list],
+            ["1991", "08", "12"],
+        )
+
+    async def test_segmented_birthdate_does_not_mix_separate_groups(self):
+        flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        groups = []
+        for kinds in (("year",), ("month", "day")):
+            segments = []
+            for kind in kinds:
+                segment = mock.AsyncMock()
+                segment.get_attribute.side_effect = lambda key, kind=kind: kind if key == "data-type" else ""
+                segments.append(segment)
+            locator = mock.MagicMock()
+            locator.count = mock.AsyncMock(return_value=len(segments))
+            locator.nth.side_effect = segments
+            group = mock.MagicMock()
+            group.is_visible = mock.AsyncMock(return_value=True)
+            group.locator.return_value = locator
+            groups.append(group)
+        group_locator = mock.MagicMock()
+        group_locator.count = mock.AsyncMock(return_value=2)
+        group_locator.nth.side_effect = groups
+        page = mock.MagicMock()
+        page.locator.return_value = group_locator
+        with self.assertRaises(sidecar.SidecarError) as caught:
+            await flow_module.fill_segmented_birthdate(page, "35")
+        self.assertEqual(caught.exception.code, "element_timeout")
+
     async def test_chinese_about_you_selectors_are_supported(self):
         flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
         self.assertIn("input[placeholder='全名']", flow_module.NAME)
         self.assertIn("input[aria-label='全名']", flow_module.NAME)
         self.assertIn("input[placeholder='年龄']", flow_module.PROFILE)
+        self.assertIn("input[placeholder='出生日期']", flow_module.PROFILE)
         self.assertEqual(
             sidecar.classify_page(sidecar.Signals(
                 url="https://auth.openai.com/about-you", name=True, profile_field="age"
@@ -527,6 +624,23 @@ class InputFlowTests(unittest.IsolatedAsyncioTestCase):
         submit.click.assert_awaited_once()
         submit.evaluate.assert_not_awaited()
 
+    async def test_click_submit_accepts_localized_complete_account_action(self):
+        flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        submit = mock.AsyncMock()
+        submit.inner_text.return_value = "完成帐户创建"
+        submit.get_attribute.return_value = "button"
+        submit.is_visible.return_value = True
+        submit.is_enabled.return_value = True
+        submit.bounding_box.return_value = {"x": 1, "y": 1, "width": 100, "height": 40}
+        candidates = mock.MagicMock()
+        candidates.count = mock.AsyncMock(return_value=1)
+        candidates.nth.return_value = submit
+        page = mock.MagicMock()
+        page.locator.return_value = candidates
+        with mock.patch.object(flow_module.asyncio, "sleep", new=mock.AsyncMock()):
+            await flow_module.click_submit(page)
+        submit.click.assert_awaited_once()
+
     async def test_click_submit_accepts_nonstandard_next_action(self):
         flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
         submit = mock.AsyncMock()
@@ -560,16 +674,44 @@ class InputFlowTests(unittest.IsolatedAsyncioTestCase):
             {"full_name": "Reese Brooks", "age": "35"}, mock.AsyncMock(), mock.AsyncMock()
         )
         page = mock.MagicMock()
-        field = mock.AsyncMock()
-        with mock.patch.object(flow_module, "fill_value", new=mock.AsyncMock()) as fill_name, mock.patch.object(
-            flow_module, "actionable", new=mock.AsyncMock(return_value=field)
-        ), mock.patch.object(flow_module, "fill_profile_field", new=mock.AsyncMock()) as fill_birthdate, mock.patch.object(
-            flow_module, "click_submit", new=mock.AsyncMock()
-        ) as submit:
-            await flow._handle_profile(page, 1.0)
-        fill_name.assert_awaited_once_with(page, flow_module.NAME, "Reese Brooks")
-        fill_birthdate.assert_awaited_once_with(field, "35")
+        name_field = mock.AsyncMock()
+        birthdate_field = mock.AsyncMock()
+        with mock.patch.object(
+            flow_module, "actionable", new=mock.AsyncMock(side_effect=[name_field, birthdate_field])
+        ), mock.patch.object(flow_module, "stable_input_value", new=mock.AsyncMock()) as fill_name, mock.patch.object(
+            flow_module, "fill_profile_field", new=mock.AsyncMock(return_value="1991-02-03")
+        ) as fill_birthdate, mock.patch.object(flow_module, "click_submit", new=mock.AsyncMock()) as submit:
+            await flow._handle_profile(page, sidecar.Signals(), 1.0)
+        fill_name.assert_awaited_once_with(name_field, "Reese Brooks")
+        fill_birthdate.assert_awaited_once_with(birthdate_field, "35")
         submit.assert_awaited_once_with(page)
+
+    async def test_segmented_profile_page_fills_segments_before_submit(self):
+        flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        flow = sidecar.RegistrationFlow(
+            {"full_name": "Reese Brooks", "age": "35"}, mock.AsyncMock(), mock.AsyncMock()
+        )
+        page = mock.MagicMock()
+        name_field = mock.AsyncMock()
+        signals = sidecar.Signals(profile_field="birthdate_segments", profile_key="segments")
+        with mock.patch.object(
+            flow_module, "actionable", new=mock.AsyncMock(return_value=name_field)
+        ), mock.patch.object(flow_module, "stable_input_value", new=mock.AsyncMock()), mock.patch.object(
+            flow_module, "fill_segmented_birthdate", new=mock.AsyncMock(return_value="1991-08-12")
+        ) as fill_segments, mock.patch.object(flow_module, "click_submit", new=mock.AsyncMock()) as submit:
+            await flow._handle_profile(page, signals, 1.0)
+        fill_segments.assert_awaited_once_with(page, "35")
+        submit.assert_awaited_once_with(page)
+
+    def test_profile_submission_gate_throttles_validation_retries(self):
+        flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        gate = flow_module.ProfileSubmissionGate()
+        gate.mark(1.0, "form-1", "Reese Brooks", "1991/02/03")
+        stable = sidecar.Signals(profile_key="form-1", name_value="Reese Brooks", profile_value="1991/02/03")
+        rollback = sidecar.Signals(profile_key="form-1", name_value="", profile_value="2026/08/12")
+        self.assertFalse(gate.should_submit(rollback, 1.5))
+        self.assertTrue(gate.should_submit(rollback, 2.0))
+        self.assertFalse(gate.should_submit(stable, 29.9))
 
     async def test_profile_page_waits_for_navigation_without_resubmitting(self):
         flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
@@ -578,19 +720,25 @@ class InputFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         page = mock.MagicMock()
         field = mock.AsyncMock()
-        with mock.patch.object(flow_module, "fill_value", new=mock.AsyncMock()) as fill_name, mock.patch.object(
+        initial = sidecar.Signals(profile_key="form-1")
+        stable = sidecar.Signals(profile_key="form-1", name_value="Reese Brooks", profile_value="1991-02-03")
+        rollback = sidecar.Signals(profile_key="form-1", name_value="", profile_value="2026-08-12")
+        with mock.patch.object(
             flow_module, "actionable", new=mock.AsyncMock(return_value=field)
-        ), mock.patch.object(flow_module, "fill_profile_field", new=mock.AsyncMock()) as fill_profile, mock.patch.object(
-            flow_module, "click_submit", new=mock.AsyncMock()
-        ) as submit, mock.patch.object(flow_module, "monotonic_time", return_value=1.0):
-            await flow._handle_profile(page, 1.0)
-            await flow._handle_profile(page, 4.0)
-            await flow._handle_profile(page, 29.9)
-        self.assertEqual(fill_name.await_count, 1)
-        self.assertEqual(fill_profile.await_count, 1)
-        self.assertEqual(submit.await_count, 1)
+        ), mock.patch.object(flow_module, "stable_input_value", new=mock.AsyncMock()) as fill_name, mock.patch.object(
+            flow_module, "fill_profile_field", new=mock.AsyncMock(return_value="1991-02-03")
+        ) as fill_profile, mock.patch.object(flow_module, "click_submit", new=mock.AsyncMock()) as submit, mock.patch.object(
+            flow_module, "monotonic_time", side_effect=[1.0, 3.0]
+        ):
+            await flow._handle_profile(page, initial, 1.0)
+            await flow._handle_profile(page, stable, 2.0)
+            await flow._handle_profile(page, rollback, 3.0)
+            await flow._handle_profile(page, stable, 29.9)
+        self.assertEqual(fill_name.await_count, 2)
+        self.assertEqual(fill_profile.await_count, 2)
+        self.assertEqual(submit.await_count, 2)
         with self.assertRaises(sidecar.SidecarError) as caught:
-            await flow._handle_profile(page, 31.0)
+            await flow._handle_profile(page, stable, 33.0)
         self.assertEqual(caught.exception.code, "profile_stalled")
 
 
@@ -635,14 +783,26 @@ class ChallengeFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await flow._step(page, sidecar.Signals(), "wait", 5.0))
         self.assertIsNone(flow.challenge_since)
 
-    async def test_persistent_challenge_errors_after_grace_period(self):
+    async def test_persistent_challenge_waits_for_slow_verification(self):
         flow = sidecar.RegistrationFlow({}, mock.AsyncMock(), mock.AsyncMock())
         page = mock.MagicMock()
         await flow._step(page, sidecar.Signals(challenge=True), "challenge", 1.0)
-        self.assertFalse(await flow._step(page, sidecar.Signals(challenge=True), "challenge", 30.9))
+        self.assertFalse(await flow._step(page, sidecar.Signals(challenge=True), "challenge", 91.0))
         with self.assertRaises(sidecar.SidecarError) as caught:
-            await flow._step(page, sidecar.Signals(challenge=True), "challenge", 31.0)
+            await flow._step(page, sidecar.Signals(challenge=True), "challenge", 121.0)
         self.assertEqual(caught.exception.code, "challenge_required")
+
+    async def test_verification_success_wait_transitions_to_email(self):
+        flow = sidecar.RegistrationFlow({}, mock.AsyncMock(), mock.AsyncMock())
+        page = mock.MagicMock()
+        waiting = sidecar.Signals(body="验证成功。正在等待 chatgpt.com 响应")
+        await flow._step(page, sidecar.Signals(challenge=True), "challenge", 1.0)
+        self.assertFalse(await flow._step(page, waiting, sidecar.classify_page(waiting), 91.0))
+        handler = mock.AsyncMock()
+        with mock.patch.object(flow, "_handle_email", handler):
+            self.assertFalse(await flow._step(page, sidecar.Signals(email=True), "email", 92.0))
+        handler.assert_awaited_once()
+        self.assertIsNone(flow.challenge_since)
 
 
 class EmailFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -949,7 +1109,6 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         registration.payload = {}
         registration.log = mock.AsyncMock()
         context = mock.MagicMock()
-        context.route = mock.AsyncMock()
         login_page = mock.MagicMock()
         login_page.goto = mock.AsyncMock()
         context.pages = [login_page]

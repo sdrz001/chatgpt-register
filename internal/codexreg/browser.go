@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	rodinput "github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/go-rod/stealth"
@@ -31,7 +32,6 @@ func registrationLauncher(headless bool) *launcher.Launcher {
 		Append("--disable-infobars", "").
 		Append("--no-first-run", "").
 		Append("--no-default-browser-check", "").
-		Append("--blink-settings", "imagesEnabled=false").
 		Append("--window-size", "1280,800")
 }
 
@@ -231,8 +231,11 @@ func registerBrowser(ctx context.Context, in Input) (token string, err error) {
 
 	// 6. 提交验证码后的页面状态机：验证码错误重发 / 密码 / 资料 / 临时错误 / 主界面。
 	ready := false
-	profileDone := false
+	profileAttempts := 0
 	profileSubmittedAt := time.Time{}
+	profileSubmittedKey := ""
+	profileExpectedName := ""
+	profileExpectedValue := ""
 	codeAttempts := 1
 	codeSubmittedAt := time.Now()
 	postCodeDeadline := time.Now().Add(3 * time.Minute)
@@ -267,16 +270,23 @@ func registerBrowser(ctx context.Context, in Input) (token string, err error) {
 				return "", fmt.Errorf("密码提交后页面未跳转: %s", registrationPageDiagnostic(signals))
 			}
 		case registrationStateProfile:
-			if !profileDone {
-				in.logf("📝 账户完善页面已出现")
-				profileField, submitErr := submitRegistrationProfile(page, in.FullName, in.Age)
+			profileElapsed := time.Since(profileSubmittedAt)
+			changedForm := profileSubmittedKey != "" && signals.ProfileKey != "" && signals.ProfileKey != profileSubmittedKey
+			rolledBack := signals.NameValue != profileExpectedName || signals.ProfileValue != profileExpectedValue
+			shouldSubmit := profileAttempts == 0 || profileElapsed >= time.Second && (signals.ProfileInvalid || changedForm || rolledBack)
+			if shouldSubmit && profileAttempts < 3 {
+				in.logf("📝 账户完善页面已出现，正在提交资料（%d/3）", profileAttempts+1)
+				profileField, profileValue, submitErr := submitRegistrationProfile(page, signals.ProfileField, in.FullName, in.Age)
 				if submitErr != nil {
 					return "", fmt.Errorf("提交账户资料失败: %w", submitErr)
 				}
-				profileDone = true
+				profileAttempts++
 				profileSubmittedAt = time.Now()
-				in.logf("👤 已提交资料 (name/%s)", profileField)
-			} else if time.Since(profileSubmittedAt) >= 30*time.Second {
+				profileSubmittedKey = signals.ProfileKey
+				profileExpectedName = in.FullName
+				profileExpectedValue = profileValue
+				in.logf("👤 已提交资料 (name/%s, %d/3)", profileField, profileAttempts)
+			} else if !profileSubmittedAt.IsZero() && profileElapsed >= 30*time.Second {
 				return "", fmt.Errorf("资料提交后页面未跳转: %s", registrationPageDiagnostic(signals))
 			}
 		case registrationStateCodeRejected:
@@ -369,26 +379,33 @@ const (
 )
 
 type registrationPageSignals struct {
-	URL          string `json:"url"`
-	Title        string `json:"title"`
-	Body         string `json:"body"`
-	HasEmail     bool   `json:"hasEmail"`
-	EmailValue   string `json:"emailValue"`
-	HasCode      bool   `json:"hasCode"`
-	CodeInvalid  bool   `json:"codeInvalid"`
-	HasPassword  bool   `json:"hasPassword"`
-	HasName      bool   `json:"hasName"`
-	ProfileField string `json:"profileField"`
-	HasReady     bool   `json:"hasReady"`
-	HasRetry     bool   `json:"hasRetry"`
+	URL            string `json:"url"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
+	HasEmail       bool   `json:"hasEmail"`
+	EmailValue     string `json:"emailValue"`
+	HasCode        bool   `json:"hasCode"`
+	CodeInvalid    bool   `json:"codeInvalid"`
+	HasPassword    bool   `json:"hasPassword"`
+	HasName        bool   `json:"hasName"`
+	NameValue      string `json:"nameValue"`
+	ProfileField   string `json:"profileField"`
+	ProfileValue   string `json:"profileValue"`
+	ProfileInvalid bool   `json:"profileInvalid"`
+	ProfileKey     string `json:"profileKey"`
+	HasReady       bool   `json:"hasReady"`
+	HasRetry       bool   `json:"hasRetry"`
 }
 
 var (
-	registrationEmailPattern  = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
-	registrationCodePattern   = regexp.MustCompile(`\b\d{6}\b`)
-	registrationNumberPattern = regexp.MustCompile(`\+?\d[\d\s().-]{7,}\d`)
-	registrationSpacePattern  = regexp.MustCompile(`\s+`)
-	registrationDatePattern   = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	registrationEmailPattern      = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
+	registrationCodePattern       = regexp.MustCompile(`\b\d{6}\b`)
+	registrationNumberPattern     = regexp.MustCompile(`\+?\d[\d\s().-]{7,}\d`)
+	registrationSpacePattern      = regexp.MustCompile(`\s+`)
+	registrationDatePattern       = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	registrationAnyDatePattern    = regexp.MustCompile(`(?:\d{4}\s*[-/]\s*\d{1,2}\s*[-/]\s*\d{1,2}|\d{1,2}\s*/\s*\d{1,2}\s*/\s*\d{4})`)
+	registrationYearSlashPattern  = regexp.MustCompile(`(?i)\d{4}/\d{1,2}/\d{1,2}|yyyy/mm/dd`)
+	registrationMonthSlashPattern = regexp.MustCompile(`(?i)\d{1,2}/\d{1,2}/\d{4}|mm/dd/yyyy`)
 )
 
 func inspectRegistrationPage(page *rod.Page) (registrationPageSignals, error) {
@@ -407,8 +424,35 @@ func inspectRegistrationPage(page *rod.Page) (registrationPageSignals, error) {
 		const email = first("#email,input[name='email'],input[type='email'],input[autocomplete='email']");
 		const code = first("input[name='code'],input[autocomplete='one-time-code']");
 		const password = first("input[type='password'],input[name='password']");
-		const name = first("input[name='name']");
-		const profile = first("input[name='age'],input[name='birthdate'],input[name='birthday'],input[type='date']");
+		const name = first("input[name='name'],input[name='fullName'],input[name='full_name'],input[id='name'],input[id='fullName'],input[id='full-name'],input[autocomplete='name'],input[placeholder='Full name'],input[placeholder='Name'],input[placeholder='全名'],input[placeholder='姓名'],input[aria-label='Full name'],input[aria-label='Name'],input[aria-label='全名'],input[aria-label='姓名']");
+		const profile = first("input[name='age'],input[name='birthdate'],input[name='birthday'],input[name='date_of_birth'],input[name='dob'],input[id='age'],input[id*='birth'],input[autocomplete='bday'],input[type='date'],input[placeholder='Age'],input[placeholder='年龄'],input[placeholder='生日'],input[placeholder='出生日期'],input[placeholder='出生年月日'],input[aria-label='Age'],input[aria-label='年龄'],input[aria-label='生日'],input[aria-label='出生日期'],input[aria-label='出生年月日'],input[placeholder='YYYY/MM/DD'],input[placeholder='YYYY-MM-DD'],input[placeholder='MM/DD/YYYY'],input[aria-label='YYYY/MM/DD'],input[aria-label='YYYY-MM-DD'],input[aria-label='MM/DD/YYYY']");
+		const dateGroups = Array.from(document.querySelectorAll("[role='group']")).filter(visible);
+		const segmentKind = element => {
+			const metadata = [element.dataset.type, element.getAttribute('aria-label')].filter(Boolean).join(' ').toLowerCase();
+			if (/year|yyyy|年|年份|年号|年號/.test(metadata)) return 'year';
+			if (/month|mm|月|月份/.test(metadata)) return 'month';
+			if (/day|dd|日|日期/.test(metadata)) return 'day';
+			const maximum = Number(element.getAttribute('aria-valuemax') || 0);
+			if (maximum > 31) return 'year';
+			if (maximum === 12) return 'month';
+			if (maximum >= 28 && maximum <= 31) return 'day';
+			return '';
+		};
+		const groupSegments = group => Array.from(group.querySelectorAll(":scope > [role='spinbutton'][data-type],:scope > [role='spinbutton'][aria-label],:scope > [contenteditable='true'][data-type]")).filter(visible);
+		const dateGroup = dateGroups.find(group => {
+			const kinds = new Set(groupSegments(group).map(segmentKind).filter(Boolean));
+			return ['year', 'month', 'day'].every(kind => kinds.has(kind));
+		}) || null;
+		const dateSegments = dateGroup ? groupSegments(dateGroup) : [];
+		const segmentValues = {}, segmentKinds = new Set();
+		for (const segment of dateSegments) {
+			const kind = segmentKind(segment);
+			const digits = String(segment.getAttribute('aria-valuenow') || segment.textContent || '').match(/\d+/)?.[0] || '';
+			if (kind) segmentKinds.add(kind);
+			if (kind && digits) segmentValues[kind] = digits;
+		}
+		const segmentedBirthdate = ['year', 'month', 'day'].every(kind => segmentKinds.has(kind));
+		const segmentedValue = segmentedBirthdate && ['year', 'month', 'day'].every(kind => segmentValues[kind]) ? segmentValues.year.padStart(4, '0') + '-' + segmentValues.month.padStart(2, '0') + '-' + segmentValues.day.padStart(2, '0') : '';
 		const actions = Array.from(document.querySelectorAll("button,a,[role='button']")).filter(visible).map(el => (el.innerText || el.textContent || '').trim()).join('\n');
 		const alerts = Array.from(document.querySelectorAll("[role='alert'],[aria-live='assertive']")).filter(visible).map(el => (el.innerText || el.textContent || '').trim()).join('\n');
 		return {
@@ -421,7 +465,11 @@ func inspectRegistrationPage(page *rod.Page) (registrationPageSignals, error) {
 			codeInvalid: !!code && (code.getAttribute('aria-invalid') === 'true' || /invalid|incorrect|wrong|expired|错误|无效|过期|正しくありません|無効|有効期限/.test(alerts.toLowerCase())),
 			hasPassword: !!password,
 			hasName: !!name,
-			profileField: profile ? (profile.getAttribute('name') || (profile.type === 'date' ? 'birthdate' : '')) : '',
+			nameValue: name ? (name.value || '') : '',
+			profileField: profile ? (profile.getAttribute('name') || (profile.type === 'date' || /birth|生日|出生日期|出生年月日/i.test([profile.id, profile.placeholder, profile.getAttribute('aria-label'), profile.autocomplete].filter(Boolean).join(' ')) ? 'birthdate' : 'age')) : (segmentedBirthdate ? 'birthdate_segments' : ''),
+			profileValue: profile ? (profile.value || '') : segmentedValue,
+			profileInvalid: profile ? (profile.getAttribute('aria-invalid') === 'true' || /invalid|incorrect|required|date of birth|birth date|birthday|错误|无效|必填|出生日期|生年月日|正しく|無効/i.test(alerts)) : dateSegments.some(segment => segment.getAttribute('aria-invalid') === 'true'),
+			profileKey: profile ? [performance.timeOrigin, profile.name, profile.id, profile.type, profile.placeholder, profile.getAttribute('aria-label')].filter(Boolean).join('|') : (segmentedBirthdate ? String(performance.timeOrigin) + '|birthdate_segments' : ''),
 			hasReady: !!first("textarea[name='prompt-textarea'],#prompt-textarea,[data-testid='composer'],[contenteditable='true'][data-lexical-editor='true']"),
 			hasRetry: /try again|retry|重试|再試行|もう一度|다시 시도/i.test(actions)
 		};
@@ -573,44 +621,225 @@ func submitRegistrationPassword(page *rod.Page, password string) error {
 	return nil
 }
 
-func submitRegistrationProfile(page *rod.Page, fullName, age string) (string, error) {
-	pg := page.CancelTimeout().Timeout(15 * time.Second)
-	nameInput, err := visibleRegistrationElement(pg, "input[name='name']")
+const registrationNameSelector = "input[name='name'],input[name='fullName'],input[name='full_name'],input[id='name'],input[id='fullName'],input[id='full-name'],input[autocomplete='name'],input[placeholder='Full name'],input[placeholder='Name'],input[placeholder='全名'],input[placeholder='姓名'],input[aria-label='Full name'],input[aria-label='Name'],input[aria-label='全名'],input[aria-label='姓名']"
+const registrationProfileSelector = "input[name='age'],input[name='birthdate'],input[name='birthday'],input[name='date_of_birth'],input[name='dob'],input[id='age'],input[id*='birth'],input[autocomplete='bday'],input[type='date'],input[placeholder='Age'],input[placeholder='年龄'],input[placeholder='生日'],input[placeholder='出生日期'],input[placeholder='出生年月日'],input[aria-label='Age'],input[aria-label='年龄'],input[aria-label='生日'],input[aria-label='出生日期'],input[aria-label='出生年月日'],input[placeholder='YYYY/MM/DD'],input[placeholder='YYYY-MM-DD'],input[placeholder='MM/DD/YYYY'],input[aria-label='YYYY/MM/DD'],input[aria-label='YYYY-MM-DD'],input[aria-label='MM/DD/YYYY']"
+
+func submitRegistrationProfile(page *rod.Page, detectedField, fullName, age string) (string, string, error) {
+	pg := page.CancelTimeout().Timeout(20 * time.Second)
+	nameInput, err := visibleRegistrationElement(pg, registrationNameSelector)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	if err := replaceRegistrationInput(nameInput, fullName); err != nil {
-		return "", err
+	if err := replaceStableRegistrationInput(nameInput, fullName); err != nil {
+		return "", "", err
 	}
-	profileInput, err := visibleRegistrationElement(pg, "input[name='age'],input[name='birthdate'],input[name='birthday'],input[type='date']")
-	if err != nil {
-		return "", err
-	}
-	field := "age"
-	if name, attrErr := profileInput.Attribute("name"); attrErr == nil && name != nil && strings.TrimSpace(*name) != "" {
-		field = strings.ToLower(strings.TrimSpace(*name))
-	} else if inputType, attrErr := profileInput.Attribute("type"); attrErr == nil && inputType != nil && strings.EqualFold(*inputType, "date") {
-		field = "birthdate"
-	}
-	profileValue := strings.TrimSpace(age)
-	if field == "birthdate" || field == "birthday" {
+	field, profileValue := detectedField, ""
+	if detectedField == "birthdate_segments" {
 		profileValue = registrationBirthdate(age, time.Now())
+		if err := fillRegistrationBirthdateSegments(pg, profileValue); err != nil {
+			return "", "", err
+		}
+	} else {
+		profileInput, profileErr := visibleRegistrationElement(pg, registrationProfileSelector)
+		if profileErr != nil {
+			return "", "", profileErr
+		}
+		metadata, metadataErr := registrationInputMetadata(profileInput)
+		if metadataErr != nil {
+			return "", "", metadataErr
+		}
+		field, profileValue = registrationProfileValue(age, metadata, time.Now())
+		if err := replaceStableRegistrationInput(profileInput, profileValue); err != nil {
+			return "", "", err
+		}
 	}
-	if err := replaceRegistrationInput(profileInput, profileValue); err != nil {
-		return "", err
-	}
-	button, err := visibleRegistrationElement(pg, "button[type='submit']")
+	button, err := visibleRegistrationElement(pg, "button[type='submit'],input[type='submit'],form button:not([type])")
 	if err != nil {
-		return "", err
+		button, err = visibleRegistrationAction(pg, `(?i)^\s*(continue|next|create account|complete account creation|继续|下一步|创建账户|创建帐号|创建帐户|完成账户创建|完成帐号创建|完成帐户创建)\s*$`)
+		if err != nil {
+			return "", "", err
+		}
 	}
 	if _, err := button.Eval(`() => this.click()`); err != nil {
 		signals, inspectErr := inspectRegistrationPage(page)
 		if inspectErr == nil && (!signals.HasName || signals.ProfileField == "") {
-			return field, nil
+			return field, profileValue, nil
 		}
+		return "", "", err
+	}
+	return field, profileValue, nil
+}
+
+const registrationDateSegmentSelector = ":scope > [role='spinbutton'][data-type],:scope > [role='spinbutton'][aria-label],:scope > [contenteditable='true'][data-type]"
+
+func registrationBirthdateSegments(value string) map[string]string {
+	parts := strings.Split(value, "-")
+	if len(parts) != 3 {
+		return map[string]string{}
+	}
+	return map[string]string{"year": parts[0], "month": parts[1], "day": parts[2]}
+}
+
+func registrationDateSegmentKind(element *rod.Element) (string, error) {
+	result, err := element.Eval(`() => {
+		const metadata = [this.dataset.type, this.getAttribute('aria-label')].filter(Boolean).join(' ').toLowerCase();
+		if (/year|yyyy|年|年份|年号|年號/.test(metadata)) return 'year';
+		if (/month|mm|月|月份/.test(metadata)) return 'month';
+		if (/day|dd|日|日期/.test(metadata)) return 'day';
+		const maximum = Number(this.getAttribute('aria-valuemax') || 0);
+		if (maximum > 31) return 'year';
+		if (maximum === 12) return 'month';
+		if (maximum >= 28 && maximum <= 31) return 'day';
+		return '';
+	}`)
+	if err != nil {
 		return "", err
 	}
-	return field, nil
+	return result.Value.Str(), nil
+}
+
+func registrationDateSegmentValue(element *rod.Element) (int, error) {
+	result, err := element.Eval(`() => Number((this.getAttribute('aria-valuenow') || this.textContent || '').match(/\d+/)?.[0] || NaN)`)
+	if err != nil {
+		return 0, err
+	}
+	return result.Value.Int(), nil
+}
+
+func fillRegistrationBirthdateSegments(page *rod.Page, birthdate string) error {
+	values := registrationBirthdateSegments(birthdate)
+	if len(values) != 3 {
+		return fmt.Errorf("生日格式无效")
+	}
+	groups, err := page.Elements("[role='group']")
+	if err != nil {
+		return err
+	}
+	segments := map[string]*rod.Element{}
+	for _, group := range groups {
+		visible, visibleErr := group.Visible()
+		if visibleErr != nil || !visible {
+			continue
+		}
+		elements, elementsErr := group.Elements(registrationDateSegmentSelector)
+		if elementsErr != nil {
+			return elementsErr
+		}
+		grouped := map[string]*rod.Element{}
+		for _, element := range elements {
+			elementVisible, elementVisibleErr := element.Visible()
+			if elementVisibleErr != nil || !elementVisible {
+				continue
+			}
+			kind, kindErr := registrationDateSegmentKind(element)
+			if kindErr != nil {
+				return kindErr
+			}
+			if kind != "" && grouped[kind] == nil {
+				grouped[kind] = element
+			}
+		}
+		if len(grouped) == 3 {
+			segments = grouped
+			break
+		}
+	}
+	if len(segments) != 3 {
+		return fmt.Errorf("分段生日控件不完整")
+	}
+	for _, kind := range []string{"year", "month", "day"} {
+		keys := make([]rodinput.Key, 0, len(values[kind]))
+		for _, character := range values[kind] {
+			keys = append(keys, rodinput.Key(character))
+		}
+		if err := segments[kind].Type(keys...); err != nil {
+			return err
+		}
+		time.Sleep(150 * time.Millisecond)
+		current, valueErr := registrationDateSegmentValue(segments[kind])
+		expected, _ := strconv.Atoi(values[kind])
+		if valueErr != nil || current != expected {
+			return fmt.Errorf("生日分段未保留预期值")
+		}
+	}
+	time.Sleep(350 * time.Millisecond)
+	for kind, element := range segments {
+		current, valueErr := registrationDateSegmentValue(element)
+		expected, _ := strconv.Atoi(values[kind])
+		if valueErr != nil || current != expected {
+			return fmt.Errorf("分段生日未保持稳定")
+		}
+	}
+	return nil
+}
+
+type registrationInputMeta struct {
+	Name, ID, Type, Autocomplete, Placeholder, AriaLabel, Value string
+}
+
+func registrationInputMetadata(input *rod.Element) (registrationInputMeta, error) {
+	var metadata registrationInputMeta
+	result, err := input.Eval(`() => ({name: this.name || '', id: this.id || '', type: this.type || '', autocomplete: this.autocomplete || '', placeholder: this.placeholder || '', ariaLabel: this.getAttribute('aria-label') || '', value: this.value || ''})`)
+	if err != nil {
+		return metadata, err
+	}
+	if err := result.Value.Unmarshal(&metadata); err != nil {
+		return metadata, err
+	}
+	return metadata, nil
+}
+
+func registrationProfileValue(age string, metadata registrationInputMeta, now time.Time) (string, string) {
+	attributes := strings.ToLower(strings.Join([]string{metadata.Name, metadata.ID, metadata.Type, metadata.Autocomplete, metadata.Placeholder, metadata.AriaLabel}, " "))
+	birthdate := strings.EqualFold(metadata.Type, "date") || containsRegistrationText(attributes, "birth", "birthday", "date_of_birth", "dob", "bday", "生日", "出生日期", "出生年月日", "yyyy/mm/dd", "yyyy-mm-dd", "mm/dd/yyyy")
+	if !birthdate {
+		age = strings.TrimSpace(age)
+		if _, err := strconv.Atoi(age); err == nil {
+			return "age", age
+		}
+		return "age", "30"
+	}
+	value := registrationBirthdate(age, now)
+	currentValue := strings.TrimSpace(metadata.Value)
+	parts := strings.Split(value, "-")
+	if !strings.EqualFold(metadata.Type, "date") && registrationYearSlashPattern.MatchString(currentValue) {
+		value = parts[0] + "/" + parts[1] + "/" + parts[2]
+	} else if !strings.EqualFold(metadata.Type, "date") && registrationMonthSlashPattern.MatchString(currentValue) {
+		value = parts[1] + "/" + parts[2] + "/" + parts[0]
+	} else if !strings.EqualFold(metadata.Type, "date") && strings.Contains(attributes, "yyyy/mm/dd") {
+		value = parts[0] + "/" + parts[1] + "/" + parts[2]
+	} else if !strings.EqualFold(metadata.Type, "date") && strings.Contains(attributes, "mm/dd/yyyy") {
+		value = parts[1] + "/" + parts[2] + "/" + parts[0]
+	}
+	return "birthdate", value
+}
+
+func replaceStableRegistrationInput(input *rod.Element, value string) error {
+	if err := replaceRegistrationInput(input, value); err != nil {
+		return err
+	}
+	_ = input.Blur()
+	time.Sleep(350 * time.Millisecond)
+	current, err := input.Property("value")
+	if err == nil && current.Str() == value {
+		return nil
+	}
+	if err := input.SelectAllText(); err != nil {
+		return err
+	}
+	if err := input.Input(value); err != nil {
+		return err
+	}
+	_ = input.Blur()
+	time.Sleep(350 * time.Millisecond)
+	current, err = input.Property("value")
+	if err != nil {
+		return err
+	}
+	if current.Str() != value {
+		return fmt.Errorf("资料输入框未保留预期值")
+	}
+	return nil
 }
 
 func registrationBirthdate(age string, now time.Time) string {
@@ -650,6 +879,32 @@ func visibleRegistrationElement(page *rod.Page, selector string) (*rod.Element, 
 		}
 	}
 	return nil, fmt.Errorf("未找到可见元素 %s", selector)
+}
+
+func visibleRegistrationAction(page *rod.Page, pattern string) (*rod.Element, error) {
+	expression, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	elements, err := page.Elements("button,input[type='submit'],[role='button']")
+	if err != nil {
+		return nil, err
+	}
+	for _, element := range elements {
+		visible, visibleErr := element.Visible()
+		if visibleErr != nil || !visible {
+			continue
+		}
+		disabled, disabledErr := element.Disabled()
+		if disabledErr != nil || disabled {
+			continue
+		}
+		text, textErr := element.Text()
+		if textErr == nil && expression.MatchString(strings.TrimSpace(text)) {
+			return element, nil
+		}
+	}
+	return nil, fmt.Errorf("未找到可见提交操作")
 }
 
 func clickRegistrationRetry(page *rod.Page) error {
@@ -717,6 +972,7 @@ func safeRegistrationURL(rawURL string) string {
 
 func sanitizeRegistrationDiagnostic(value string) string {
 	value = registrationEmailPattern.ReplaceAllString(value, "[email]")
+	value = registrationAnyDatePattern.ReplaceAllString(value, "[date]")
 	value = registrationCodePattern.ReplaceAllString(value, "[code]")
 	value = registrationNumberPattern.ReplaceAllString(value, "[number]")
 	value = registrationSpacePattern.ReplaceAllString(strings.TrimSpace(value), " ")

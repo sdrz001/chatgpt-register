@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>账户管理 · ChatGPT 注册管理</title>
-<link rel="stylesheet" href="/static/style.css?v=16">
+<link rel="stylesheet" href="/static/style.css?v=17">
 </head>
 <body data-page="accounts">
 <div class="layout">
@@ -54,6 +54,14 @@
         <option value="enterprise">Enterprise</option>
         <option value="edu">Edu</option>
       </select>
+      <select id="filter-trial-status" class="px-input">
+        <option value="">全部试用资格</option>
+        <option value="eligible">有资格</option>
+        <option value="ineligible">无资格</option>
+        <option value="unchecked">试用资格待检测</option>
+        <option value="checking">试用资格检测中</option>
+        <option value="error">试用资格检测失败</option>
+      </select>
       <select id="filter-account-category" class="px-input">
         <option value="">全部分类</option>
         <option value="uncategorized">未分类</option>
@@ -88,7 +96,7 @@
       <span id="acc-batch-count">已选 0 项</span>
       <button class="px-btn primary" onclick="copySelectedAT()">复制 AT</button>
       <button class="px-btn" onclick="copySelectedMailboxLinks()">复制邮箱----取件URL</button>
-      <button class="px-btn" onclick="checkSelectedAT()">检测 AT</button>
+      <button class="px-btn" onclick="checkSelectedAT()">检测 AT / 试用资格</button>
       <button class="px-btn" id="batch-plus-mail-btn" onclick="checkSelectedPlusMail()">检查 Plus 邮件</button>
       <span id="plus-mail-progress" style="display:none"></span>
       <select id="batch-account-category" class="px-input batch-select" onchange="assignSelectedCategory(this.value)">
@@ -104,7 +112,7 @@
       <table class="px-table">
         <thead><tr>
           <th class="col-check"><input type="checkbox" id="acc-check-all" onclick="toggleSelectAll(this.checked)"></th>
-          <th>邮箱</th><th>分类</th><th>AT 状态</th><th>套餐</th><th>Plus 邮件</th><th>注册状态</th><th>Codex</th><th>Sub2API</th><th>出库</th><th>操作</th>
+          <th>邮箱</th><th>分类</th><th>AT 状态</th><th>套餐</th><th>0元试用</th><th>Plus 邮件</th><th>注册状态</th><th>Codex</th><th>Sub2API</th><th>出库</th><th>操作</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
@@ -155,6 +163,6 @@
 
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js?v=2"></script>
-<script src="/static/accounts.js?v=20"></script>
+<script src="/static/accounts.js?v=21"></script>
 </body>
 </html>

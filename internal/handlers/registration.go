@@ -21,6 +21,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type Handler struct {
@@ -103,6 +104,9 @@ func (h *Handler) List(c *gin.Context) {
 	}
 	if s := c.Query("at_status"); s != "" {
 		q = q.Where("at_status = ?", s)
+	}
+	if s := c.Query("trial_status"); s != "" {
+		q = q.Where("trial_status = ?", s)
 	}
 	if s := c.Query("plan_type"); s != "" {
 		q = q.Where("LOWER(plan_type) = ?", strings.ToLower(s))
@@ -244,8 +248,8 @@ func (h *Handler) schedulePendingATChecks() {
 	}
 	var registrations []models.Registration
 	cutoff := time.Now().Add(-30 * time.Minute)
-	if h.DB.Where("status = ? AND auth_data <> '' AND (at_checked_at IS NULL OR at_checked_at < ?)", "registered", cutoff).
-		Order("at_checked_at, id").Limit(200).Find(&registrations).Error != nil {
+	if h.DB.Where("status = ? AND auth_data <> '' AND (trial_status = ? OR at_checked_at IS NULL OR at_checked_at < ?)", "registered", "unchecked", cutoff).
+		Order("trial_status DESC, at_checked_at, id").Limit(200).Find(&registrations).Error != nil {
 		return
 	}
 	for _, registration := range registrations {
@@ -253,11 +257,23 @@ func (h *Handler) schedulePendingATChecks() {
 	}
 }
 
+type trialCheckResult struct {
+	Status     string
+	Plan       string
+	Label      string
+	Percent    int
+	Periods    int
+	PeriodUnit string
+	AutoRenew  bool
+	Error      string
+}
+
 type atCheckResult struct {
 	Status    string
 	PlanType  string
 	Error     string
 	ExpiresAt *time.Time
+	Trial     trialCheckResult
 }
 
 func (h *Handler) scheduleATCheck(registration models.Registration, manual bool) bool {
@@ -265,7 +281,8 @@ func (h *Handler) scheduleATCheck(registration models.Registration, manual bool)
 		return false
 	}
 	if !manual {
-		if !h.autoATCheck.Load() || registration.ATCheckedAt != nil && time.Since(*registration.ATCheckedAt) < 30*time.Minute {
+		trialChecked := registration.TrialStatus != "" && registration.TrialStatus != "unchecked"
+		if !h.autoATCheck.Load() || trialChecked && registration.ATCheckedAt != nil && time.Since(*registration.ATCheckedAt) < 30*time.Minute {
 			return false
 		}
 	}
@@ -277,6 +294,10 @@ func (h *Handler) scheduleATCheck(registration models.Registration, manual bool)
 	previousStatus := registration.ATStatus
 	if previousStatus == "" || previousStatus == "checking" {
 		previousStatus = "unchecked"
+	}
+	previousTrialStatus := registration.TrialStatus
+	if previousTrialStatus == "" || previousTrialStatus == "checking" {
+		previousTrialStatus = "unchecked"
 	}
 	h.atCheckMu.Lock()
 	if !manual && !h.autoATCheck.Load() {
@@ -306,8 +327,8 @@ func (h *Handler) scheduleATCheck(registration models.Registration, manual bool)
 	}
 	slots := h.atCheckSlots
 	h.atCheckMu.Unlock()
-	updated := h.DB.Model(&models.Registration{}).Where("id = ? AND auth_data = ?", registration.ID, registration.AuthData).
-		Updates(map[string]any{"at_status": "checking", "at_error": ""})
+	updated := h.DB.Model(&models.Registration{}).Where("id = ? AND account_id = ?", registration.ID, registration.AccountID).
+		Updates(map[string]any{"at_status": "checking", "at_error": "", "trial_status": "checking", "trial_error": ""})
 	if updated.Error != nil || updated.RowsAffected == 0 {
 		if cancel != nil {
 			cancel()
@@ -319,7 +340,7 @@ func (h *Handler) scheduleATCheck(registration models.Registration, manual bool)
 		select {
 		case slots <- struct{}{}:
 		case <-ctx.Done():
-			h.restoreCanceledATCheck(id, registration.AuthData, previousStatus)
+			h.restoreCanceledATCheck(id, registration.AccountID, previousStatus, previousTrialStatus)
 			h.finishATCheck(id)
 			return
 		}
@@ -329,31 +350,40 @@ func (h *Handler) scheduleATCheck(registration models.Registration, manual bool)
 		}()
 		var current models.Registration
 		if h.DB.First(&current, id).Error != nil {
-			h.restoreCanceledATCheck(id, registration.AuthData, previousStatus)
+			h.restoreCanceledATCheck(id, registration.AccountID, previousStatus, previousTrialStatus)
 			return
 		}
 		result := h.checkRegistrationAT(ctx, current)
 		if ctx.Err() != nil {
-			h.restoreCanceledATCheck(id, current.AuthData, previousStatus)
+			h.restoreCanceledATCheck(id, current.AccountID, previousStatus, previousTrialStatus)
 			return
 		}
 		now := time.Now()
 		updates := map[string]any{
 			"at_status": result.Status, "at_error": result.Error,
 			"at_checked_at": now, "at_expires_at": result.ExpiresAt,
+			"trial_status": result.Trial.Status, "trial_plan": result.Trial.Plan,
+			"trial_label": result.Trial.Label, "trial_percent": result.Trial.Percent,
+			"trial_periods": result.Trial.Periods, "trial_period_unit": result.Trial.PeriodUnit,
+			"trial_auto_renew": result.Trial.AutoRenew, "trial_error": result.Trial.Error,
+			"trial_checked_at": now,
 		}
 		if result.PlanType != "" {
 			updates["plan_type"] = result.PlanType
 			updates["auth_data"] = authDataWithPlan(current.AuthData, result.PlanType)
 		}
-		h.DB.Model(&models.Registration{}).Where("id = ? AND auth_data = ?", id, current.AuthData).Updates(updates)
+		h.DB.Session(&gorm.Session{Logger: h.DB.Logger.LogMode(logger.Silent)}).
+			Model(&models.Registration{}).Where("id = ? AND account_id = ?", id, current.AccountID).Updates(updates)
 	}(registration.ID)
 	return true
 }
 
-func (h *Handler) restoreCanceledATCheck(id uint, authData, previousStatus string) {
-	h.DB.Model(&models.Registration{}).Where("id = ? AND auth_data = ?", id, authData).
-		Updates(map[string]any{"at_status": previousStatus, "at_error": ""})
+func (h *Handler) restoreCanceledATCheck(id uint, accountID, previousStatus, previousTrialStatus string) {
+	h.DB.Model(&models.Registration{}).Where("id = ? AND account_id = ?", id, accountID).
+		Updates(map[string]any{
+			"at_status": previousStatus, "at_error": "",
+			"trial_status": previousTrialStatus, "trial_error": "",
+		})
 }
 
 func (h *Handler) finishATCheck(id uint) {
@@ -363,17 +393,21 @@ func (h *Handler) finishATCheck(id uint) {
 	h.atCheckMu.Unlock()
 }
 
+func trialCheckError(message string) trialCheckResult {
+	return trialCheckResult{Status: "error", Error: message}
+}
+
 func (h *Handler) checkRegistrationAT(ctx context.Context, registration models.Registration) atCheckResult {
 	credentials := buildCredentials(registration.AuthData, registration.Email)
 	token, _ := credentials["access_token"].(string)
 	token = strings.TrimSpace(token)
 	if token == "" {
-		return atCheckResult{Status: "missing", Error: "账号没有 AT"}
+		return atCheckResult{Status: "missing", Error: "账号没有 AT", Trial: trialCheckError("账号没有 AT")}
 	}
 	planType, expiresAt, _ := codexreg.AccessTokenDetails(token)
 	planType = normalizePlanType(planType)
 	if expiresAt != nil && !expiresAt.After(time.Now()) {
-		return atCheckResult{Status: "invalid", PlanType: planType, Error: "AT 已过期", ExpiresAt: expiresAt}
+		return atCheckResult{Status: "invalid", PlanType: planType, Error: "AT 已过期", ExpiresAt: expiresAt, Trial: trialCheckError("AT 已过期")}
 	}
 	clientFactory := h.ATCheckClient
 	if clientFactory == nil {
@@ -381,7 +415,7 @@ func (h *Handler) checkRegistrationAT(ctx context.Context, registration models.R
 	}
 	client, err := clientFactory(registration.Proxy)
 	if err != nil {
-		return atCheckResult{Status: "error", PlanType: planType, Error: "代理配置错误", ExpiresAt: expiresAt}
+		return atCheckResult{Status: "error", PlanType: planType, Error: "代理配置错误", ExpiresAt: expiresAt, Trial: trialCheckError("代理配置错误")}
 	}
 	endpoint := strings.TrimSpace(h.ATCheckURL)
 	if endpoint == "" {
@@ -389,7 +423,7 @@ func (h *Handler) checkRegistrationAT(ctx context.Context, registration models.R
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return atCheckResult{Status: "error", PlanType: planType, Error: "检测请求创建失败", ExpiresAt: expiresAt}
+		return atCheckResult{Status: "error", PlanType: planType, Error: "检测请求创建失败", ExpiresAt: expiresAt, Trial: trialCheckError("检测请求创建失败")}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
@@ -400,28 +434,33 @@ func (h *Handler) checkRegistrationAT(ctx context.Context, registration models.R
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return atCheckResult{Status: "error", PlanType: planType, Error: "AT 检测网络异常", ExpiresAt: expiresAt}
+		return atCheckResult{Status: "error", PlanType: planType, Error: "AT 检测网络异常", ExpiresAt: expiresAt, Trial: trialCheckError("AT 检测网络异常")}
 	}
 	defer resp.Body.Close()
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if readErr != nil {
-		return atCheckResult{Status: "error", PlanType: planType, Error: "AT 检测响应读取失败", ExpiresAt: expiresAt}
+		return atCheckResult{Status: "error", PlanType: planType, Error: "AT 检测响应读取失败", ExpiresAt: expiresAt, Trial: trialCheckError("AT 检测响应读取失败")}
 	}
 	switch resp.StatusCode {
 	case http.StatusOK:
 		if onlinePlan := planTypeFromAccountsResponse(body, registration.AccountID); onlinePlan != "" {
 			planType = onlinePlan
 		}
-		return atCheckResult{Status: "valid", PlanType: planType, ExpiresAt: expiresAt}
+		trial, err := trialFromAccountsResponse(body, registration.AccountID)
+		if err != nil {
+			return atCheckResult{Status: "valid", PlanType: planType, ExpiresAt: expiresAt, Trial: trialCheckError("试用资格响应解析失败")}
+		}
+		return atCheckResult{Status: "valid", PlanType: planType, ExpiresAt: expiresAt, Trial: trial}
 	case http.StatusUnauthorized:
-		return atCheckResult{Status: "invalid", PlanType: planType, Error: "服务端已拒绝该 AT", ExpiresAt: expiresAt}
+		return atCheckResult{Status: "invalid", PlanType: planType, Error: "服务端已拒绝该 AT", ExpiresAt: expiresAt, Trial: trialCheckError("服务端已拒绝该 AT")}
 	case http.StatusForbidden:
 		if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "json") {
-			return atCheckResult{Status: "invalid", PlanType: planType, Error: "账户或 AT 已被服务端停用", ExpiresAt: expiresAt}
+			return atCheckResult{Status: "invalid", PlanType: planType, Error: "账户或 AT 已被服务端停用", ExpiresAt: expiresAt, Trial: trialCheckError("账户或 AT 已被服务端停用")}
 		}
-		return atCheckResult{Status: "error", PlanType: planType, Error: "AT 检测被网关拦截", ExpiresAt: expiresAt}
+		return atCheckResult{Status: "error", PlanType: planType, Error: "AT 检测被网关拦截", ExpiresAt: expiresAt, Trial: trialCheckError("AT 检测被网关拦截")}
 	default:
-		return atCheckResult{Status: "error", PlanType: planType, Error: fmt.Sprintf("AT 检测返回 HTTP %d", resp.StatusCode), ExpiresAt: expiresAt}
+		message := fmt.Sprintf("AT 检测返回 HTTP %d", resp.StatusCode)
+		return atCheckResult{Status: "error", PlanType: planType, Error: message, ExpiresAt: expiresAt, Trial: trialCheckError(message)}
 	}
 }
 
@@ -439,6 +478,60 @@ func authDataWithPlan(authData, planType string) string {
 		return authData
 	}
 	return string(encoded)
+}
+
+func trialFromAccountsResponse(body []byte, preferredAccountID string) (trialCheckResult, error) {
+	var root map[string]any
+	if json.Unmarshal(body, &root) != nil {
+		return trialCheckResult{}, fmt.Errorf("invalid accounts response")
+	}
+	accounts, ok := root["accounts"].(map[string]any)
+	if !ok {
+		return trialCheckResult{}, fmt.Errorf("accounts missing")
+	}
+	var entry map[string]any
+	var found bool
+	if preferredAccountID != "" {
+		entry, found = accounts[preferredAccountID].(map[string]any)
+	} else {
+		entry, found = accounts["default"].(map[string]any)
+		if !found && len(accounts) == 1 {
+			for _, raw := range accounts {
+				entry, found = raw.(map[string]any)
+			}
+		}
+	}
+	if !found {
+		return trialCheckResult{}, fmt.Errorf("account missing")
+	}
+	campaigns, _ := entry["eligible_promo_campaigns"].(map[string]any)
+	plus, _ := campaigns["plus"].(map[string]any)
+	metadata, _ := plus["metadata"].(map[string]any)
+	if metadata == nil {
+		return trialCheckResult{Status: "ineligible"}, nil
+	}
+	discount, _ := metadata["discount"].(map[string]any)
+	duration, _ := metadata["duration"].(map[string]any)
+	percent := mapInt(discount, "percentage")
+	periods := mapInt(duration, "num_periods")
+	periodUnit := strings.ToLower(firstMapString(duration, "period"))
+	label := firstMapString(metadata, "promotion_type_label")
+	plan := normalizePlanType(firstMapString(metadata, "plan_name"))
+	validUnit := periodUnit == "day" || periodUnit == "week" || periodUnit == "month" || periodUnit == "year"
+	expectedLabel := fmt.Sprintf("%d-%s free trial", periods, periodUnit)
+	if plan != "plus" || percent != 100 || periods <= 0 || !validUnit || !strings.EqualFold(label, expectedLabel) {
+		return trialCheckResult{Status: "ineligible"}, nil
+	}
+	noAutoRenew, hasRenewalFlag := metadata["no_auto_renewal_at_discount_end"].(bool)
+	return trialCheckResult{
+		Status: "eligible", Plan: plan, Label: label, Percent: percent,
+		Periods: periods, PeriodUnit: periodUnit, AutoRenew: hasRenewalFlag && !noAutoRenew,
+	}, nil
+}
+
+func mapInt(values map[string]any, key string) int {
+	value, _ := values[key].(float64)
+	return int(value)
 }
 
 func planTypeFromAccountsResponse(body []byte, preferredAccountID string) string {

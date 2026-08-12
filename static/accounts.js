@@ -24,6 +24,12 @@ const AT_STATUS = {
 const PLUS_MAIL_STATUS = {
   unchecked: '未检查', found: '已确认', not_found: '未发现', error: '检查失败',
 };
+const TRIAL_STATUS = {
+  unchecked: '待检测', checking: '检测中', eligible: '有资格', ineligible: '无资格', error: '检测失败',
+};
+const TRIAL_PERIOD = {
+  day: '天', week: '周', month: '个月', year: '年',
+};
 const PLAN_LABEL = {
   free: 'Free', go: 'Go', plus: 'Plus', pro: 'Pro', team: 'Team', business: 'Business', enterprise: 'Enterprise', edu: 'Edu',
 };
@@ -43,12 +49,14 @@ async function load() {
   const status = document.getElementById('filter-status').value;
   const atStatus = document.getElementById('filter-at-status').value;
   const plan = document.getElementById('filter-plan').value;
+  const trialStatus = document.getElementById('filter-trial-status').value;
   const category = document.getElementById('filter-account-category').value;
   const params = new URLSearchParams({ page, size });
   if (q) params.set('q', q);
   if (status) params.set('status', status);
   if (atStatus) params.set('at_status', atStatus);
   if (plan) params.set('plan_type', plan);
+  if (trialStatus) params.set('trial_status', trialStatus);
   if (category) params.set('category_id', category);
   const r = await api('/api/registrations?' + params);
   const d = await r.json();
@@ -56,7 +64,7 @@ async function load() {
   accTotal = d.total || 0;
   (d.data || []).forEach(x => { accCache[x.id] = x; });
   document.getElementById('rows').innerHTML = (d.data || []).map(rowHtml).join('')
-    || '<tr><td colspan="11" style="text-align:center;color:var(--text-3)">暂无数据</td></tr>';
+    || '<tr><td colspan="12" style="text-align:center;color:var(--text-3)">暂无数据</td></tr>';
   const maxPage = Math.max(1, Math.ceil((d.total || 0) / size));
   renderPager('pager', page, maxPage, p => { page = p; load(); });
   syncBatchBar();
@@ -73,6 +81,17 @@ function rowHtml(x) {
   const atTitle = [x.at_error, x.at_checked_at ? '最近检测：' + fmtTime(x.at_checked_at) : '', x.at_expires_at ? '到期：' + fmtTime(x.at_expires_at) : ''].filter(Boolean).join('\n');
   const plusMailStatus = x.plus_mail_status || 'unchecked';
   const plusMailTitle = [x.plus_mail_subject, x.plus_mail_error, x.plus_mail_received_at ? '邮件时间：' + fmtTime(x.plus_mail_received_at) : '', x.plus_mail_checked_at ? '检查时间：' + fmtTime(x.plus_mail_checked_at) : ''].filter(Boolean).join('\n');
+  const trialStatus = x.trial_status || 'unchecked';
+  const trialDuration = x.trial_periods && x.trial_period_unit ? `${x.trial_periods}${TRIAL_PERIOD[x.trial_period_unit] || x.trial_period_unit}` : '';
+  const trialTitle = [
+    x.trial_plan ? '套餐：' + (PLAN_LABEL[x.trial_plan] || x.trial_plan) : '',
+    x.trial_percent ? '优惠：' + x.trial_percent + '%' : '',
+    trialDuration ? '时长：' + trialDuration : '',
+    trialStatus === 'eligible' ? '续订方式：' + (x.trial_auto_renew ? '自动续订' : '不自动续订') : '',
+    x.trial_label ? '活动：' + x.trial_label : '',
+    x.trial_error,
+    x.trial_checked_at ? '检测时间：' + fmtTime(x.trial_checked_at) : '',
+  ].filter(Boolean).join('\n');
   const plan = String(x.plan_type || '').toLowerCase();
   return `
     <tr class="${accSelected.has(x.id) ? 'row-sel' : ''}">
@@ -81,6 +100,7 @@ function rowHtml(x) {
       <td>${x.category ? `<span class="category-chip">${esc(x.category.name)}</span>` : '<span class="table-muted">未分类</span>'}</td>
       <td><span class="badge at-${esc(atStatus)}" title="${esc(atTitle)}">${AT_STATUS[atStatus] || esc(atStatus)}</span></td>
       <td><span class="plan-badge plan-${esc(plan || 'unknown')}">${PLAN_LABEL[plan] || esc(plan || '未知')}</span></td>
+      <td><span class="badge trial-${esc(trialStatus)}" title="${esc(trialTitle)}">${TRIAL_STATUS[trialStatus] || esc(trialStatus)}</span></td>
       <td><span class="badge ${plusMailStatus === 'found' ? 'registered' : (plusMailStatus === 'error' ? 'register_failed' : 'pending')}" title="${esc(plusMailTitle)}">${PLUS_MAIL_STATUS[plusMailStatus] || esc(plusMailStatus)}</span></td>
       <td><span class="badge ${esc(x.status)}">${ACC_STATUS[x.status] || esc(x.status)}</span></td>
       <td><span class="badge ${esc(x.codex_status || 'pending')}" title="${codexTitle}">${CODEX_STATUS[x.codex_status] || '待授权'}</span></td>
@@ -98,7 +118,7 @@ function rowHtml(x) {
         <button class="icon-btn" title="复制邮箱----取件URL" onclick="copyMailboxLinks([${x.id}])">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
         </button>
-        <button class="icon-btn" title="检测 AT 与套餐" ${canCopyAT && atStatus !== 'checking' ? '' : 'disabled'} onclick="checkAT([${x.id}])">
+        <button class="icon-btn" title="检测 AT、套餐与0元试用资格" ${canCopyAT && atStatus !== 'checking' ? '' : 'disabled'} onclick="checkAT([${x.id}])">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 1-2.34-5.66"/><path d="M20 4v7h-7"/><path d="m9 12 2 2 4-4"/></svg>
         </button>
         <button class="icon-btn" title="检查 Plus 开通邮件" onclick="checkPlusMail([${x.id}])">
@@ -241,8 +261,8 @@ async function checkAT(ids) {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }),
   });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) return toast(d.error || '启动 AT 检测失败', true);
-  toast('已开始检测 ' + Number(d.scheduled || 0) + ' 个 AT');
+  if (!r.ok) return toast(d.error || '启动 AT 与试用资格检测失败', true);
+  toast('已开始检测 ' + Number(d.scheduled || 0) + ' 个 AT 与试用资格');
   load();
 }
 
@@ -654,7 +674,7 @@ async function del(id) {
 document.getElementById('search').addEventListener('keydown', e => {
   if (e.key === 'Enter') { page = 1; load(); }
 });
-['filter-status', 'filter-at-status', 'filter-plan', 'filter-account-category'].forEach(id => {
+['filter-status', 'filter-at-status', 'filter-plan', 'filter-trial-status', 'filter-account-category'].forEach(id => {
   document.getElementById(id).addEventListener('change', () => { page = 1; load(); });
 });
 document.getElementById('new-account-category').addEventListener('keydown', event => {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -118,7 +119,7 @@ func TestCheckRegistrationATUsesOnlinePlanAndRejectsExpiredToken(t *testing.T) {
 			t.Errorf("headers=%v", r.Header)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"accounts":{"account-id":{"account":{"plan_type":"self_serve_business_usage_based","is_default":true}}}}`)
+		fmt.Fprint(w, `{"accounts":{"account-id":{"account":{"plan_type":"self_serve_business_usage_based","is_default":true},"eligible_promo_campaigns":{"plus":{"metadata":{"plan_name":"chatgptplusplan","discount":{"percentage":100},"duration":{"num_periods":1,"period":"month"},"promotion_type_label":"1-month free trial","no_auto_renewal_at_discount_end":false}}}}}}`)
 	}))
 	defer server.Close()
 	handler := &Handler{ATCheckURL: server.URL, ATCheckClient: func(string) (*http.Client, error) { return server.Client(), nil }}
@@ -128,11 +129,103 @@ func TestCheckRegistrationATUsesOnlinePlanAndRejectsExpiredToken(t *testing.T) {
 	if result.Status != "valid" || result.PlanType != "business" || result.ExpiresAt == nil || result.Error != "" {
 		t.Fatalf("result=%+v", result)
 	}
+	if result.Trial.Status != "eligible" || result.Trial.Plan != "plus" || result.Trial.Percent != 100 || result.Trial.Periods != 1 || result.Trial.PeriodUnit != "month" || !result.Trial.AutoRenew {
+		t.Fatalf("trial=%+v", result.Trial)
+	}
 
 	expired := registrationTestJWT(t, "plus", time.Now().Add(-time.Minute))
 	result = handler.checkRegistrationAT(context.Background(), models.Registration{AuthData: `{"access_token":"` + expired + `"}`})
 	if result.Status != "invalid" || result.PlanType != "plus" || !strings.Contains(result.Error, "过期") {
 		t.Fatalf("expired result=%+v", result)
+	}
+}
+
+func TestTrialFromAccountsResponseRequiresExactEligibleCampaign(t *testing.T) {
+	eligible := []byte(`{"accounts":{"target":{"eligible_promo_campaigns":{"plus":{"metadata":{"plan_name":"chatgptplusplan","discount":{"percentage":100},"duration":{"num_periods":1,"period":"month"},"promotion_type_label":"1-month free trial","no_auto_renewal_at_discount_end":true}}}},"other":{"eligible_promo_campaigns":{"plus":{"metadata":{"plan_name":"chatgptplusplan","discount":{"percentage":100},"duration":{"num_periods":3,"period":"month"},"promotion_type_label":"3-month free trial"}}}}}}`)
+	trial, err := trialFromAccountsResponse(eligible, "target")
+	if err != nil || trial.Status != "eligible" || trial.Label != "1-month free trial" || trial.AutoRenew {
+		t.Fatalf("trial=%+v error=%v", trial, err)
+	}
+	for _, body := range [][]byte{
+		[]byte(`{"accounts":{"target":{"eligible_promo_campaigns":{}}}}`),
+		[]byte(`{"accounts":{"target":{"eligible_promo_campaigns":{"plus":{"metadata":{"plan_name":"chatgptplusplan","discount":{"percentage":50},"duration":{"num_periods":1,"period":"month"},"promotion_type_label":"1-month free trial"}}}}}}`),
+	} {
+		trial, err = trialFromAccountsResponse(body, "target")
+		if err != nil || trial.Status != "ineligible" {
+			t.Fatalf("trial=%+v error=%v", trial, err)
+		}
+	}
+	for _, body := range [][]byte{
+		[]byte(`{"accounts":{"other":{},"second":{}}}`),
+		[]byte(`{"accounts":{"default":{"eligible_promo_campaigns":{"plus":{"metadata":{"plan_name":"chatgptplusplan","discount":{"percentage":100},"duration":{"num_periods":1,"period":"month"},"promotion_type_label":"1-month free trial"}}}}}}`),
+	} {
+		if _, err = trialFromAccountsResponse(body, "missing"); err == nil {
+			t.Fatal("missing preferred account should fail")
+		}
+	}
+}
+
+func TestScheduleATCheckPersistsTrialEligibility(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "trial.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Registration{}); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := database.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	token := registrationTestJWT(t, "free", time.Now().Add(time.Hour))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"accounts":{"account-id":{"account":{"plan_type":"free"},"eligible_promo_campaigns":{"plus":{"metadata":{"plan_name":"chatgptplusplan","discount":{"percentage":100},"duration":{"num_periods":1,"period":"month"},"promotion_type_label":"1-month free trial","no_auto_renewal_at_discount_end":false}}}}}}`)
+	}))
+	defer server.Close()
+	handler := &Handler{
+		DB: database, ATCheckURL: server.URL,
+		ATCheckClient: func(string) (*http.Client, error) { return server.Client(), nil },
+		atChecking:    make(map[uint]bool), autoATCheckOps: make(map[uint]context.CancelFunc), atCheckSlots: make(chan struct{}, 1),
+	}
+	registration := models.Registration{
+		Email: "trial@example.test", Status: "registered", AccountID: "account-id",
+		AuthData: `{"access_token":"` + token + `"}`, ATStatus: "valid", TrialStatus: "unchecked",
+	}
+	if err := database.Create(&registration).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !handler.scheduleATCheck(registration, true) {
+		t.Fatal("AT check was not scheduled")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var current models.Registration
+		if err := database.First(&current, registration.ID).Error; err == nil && current.TrialStatus != "checking" {
+			if current.TrialStatus != "eligible" || current.TrialPlan != "plus" || current.TrialPercent != 100 || current.TrialPeriods != 1 || current.TrialPeriodUnit != "month" || !current.TrialAutoRenew || current.TrialCheckedAt == nil {
+				t.Fatalf("registration=%+v", current)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("AT check did not finish")
+}
+
+func TestRegistrationListFiltersTrialStatus(t *testing.T) {
+	handler, router := integrationHandlerTestRouter(t)
+	registrations := []models.Registration{
+		{Email: "eligible@example.test", Status: "registered", TrialStatus: "eligible"},
+		{Email: "ineligible@example.test", Status: "registered", TrialStatus: "ineligible"},
+	}
+	if err := handler.DB.Create(&registrations).Error; err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/registrations?trial_status=eligible", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "eligible@example.test") || strings.Contains(response.Body.String(), "ineligible@example.test") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

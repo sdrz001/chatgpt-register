@@ -13,7 +13,9 @@ EMAIL = "#email,input[name='email'],input[type='email'],input[autocomplete='emai
 PASSWORD = "input[type='password'],input[name='password'],input[autocomplete='new-password'],input[autocomplete='current-password']"
 CODE = "input[name='code'],input[autocomplete='one-time-code'],input[inputmode='numeric'][maxlength='6']"
 NAME = "input[name='name'],input[name='fullName'],input[name='full_name'],input[id='name'],input[id='fullName'],input[id='full-name'],input[autocomplete='name'],input[placeholder='Full name'],input[placeholder='Name'],input[placeholder='全名'],input[placeholder='姓名'],input[aria-label='Full name'],input[aria-label='Name'],input[aria-label='全名'],input[aria-label='姓名']"
-PROFILE = "input[name='age'],input[name='birthdate'],input[name='birthday'],input[name='date_of_birth'],input[name='dob'],input[id='age'],input[id*='birth'],input[autocomplete='bday'],input[type='date'],input[placeholder='Age'],input[placeholder='年龄'],input[placeholder='生日'],input[aria-label='Age'],input[aria-label='年龄'],input[aria-label='生日']"
+PROFILE = "input[name='age'],input[name='birthdate'],input[name='birthday'],input[name='date_of_birth'],input[name='dob'],input[id='age'],input[id*='birth'],input[autocomplete='bday'],input[type='date'],input[placeholder='Age'],input[placeholder='年龄'],input[placeholder='生日'],input[placeholder='出生日期'],input[placeholder='出生年月日'],input[aria-label='Age'],input[aria-label='年龄'],input[aria-label='生日'],input[aria-label='出生日期'],input[aria-label='出生年月日'],input[placeholder='YYYY/MM/DD'],input[placeholder='YYYY-MM-DD'],input[placeholder='MM/DD/YYYY'],input[aria-label='YYYY/MM/DD'],input[aria-label='YYYY-MM-DD'],input[aria-label='MM/DD/YYYY']"
+DATE_GROUPS = "[role='group']"
+DATE_SEGMENTS = ":scope > [role='spinbutton'][data-type],:scope > [role='spinbutton'][aria-label],:scope > [contenteditable='true'][data-type]"
 READY = "textarea[name='prompt-textarea'],#prompt-textarea,[data-testid='composer'],[data-testid='composer-input'],[contenteditable='true'][data-lexical-editor='true']"
 SUBMIT = "button[type='submit'],input[type='submit'],form button:not([type])"
 ACTIONS = "button,a,[role='button']"
@@ -21,11 +23,13 @@ CHALLENGE = "iframe[src*='challenge'],iframe[src*='captcha'],iframe[src*='turnst
 RETRY_RE = re.compile(r"try again|retry|重试|再试一次|再試行|もう一度", re.I)
 RESEND_RE = re.compile(r"resend code|send again|request another code|resend email|重新发送|重发验证码|再次发送|コードを再送|再送信", re.I)
 EXTERNAL_LOGIN_RE = re.compile(r"google|apple|microsoft|phone number|电话号码|電話番号|手机号|携帯電話", re.I)
-SUBMIT_ACTION_RE = re.compile(r"^\s*(continue|next|verify|submit|sign in|log in|create account|complete account creation|继续|下一步|验证|提交|登录|创建账户|创建帐号|完成账户创建|完成帐号创建|继续する|次へ|確認|送信|ログイン|アカウント作成|계속|다음|확인|제출|로그인)\s*$", re.I)
+SUBMIT_ACTION_RE = re.compile(r"^\s*(continue|next|verify|submit|sign in|log in|create account|complete account creation|继续|下一步|验证|提交|登录|创建账户|创建帐号|创建帐户|完成账户创建|完成帐号创建|完成帐户创建|继续する|次へ|確認|送信|ログイン|アカウント作成|계속|다음|확인|제출|로그인)\s*$", re.I)
 CHALLENGE_TEXT = (
     "verify you are human", "security check", "unusual activity", "captcha",
-    "automated access", "验证您是人类", "安全验证", "自动化访问", "可疑活动",
-    "人間であることを確認", "セキュリティチェック", "ロボットではない", "不審なアクティビティ",
+    "automated access", "verification successful", "waiting for chatgpt.com to respond",
+    "验证您是人类", "安全验证", "自动化访问", "可疑活动", "验证成功", "正在等待 chatgpt.com 响应",
+    "驗證成功", "正在等待 chatgpt.com 回應", "人間であることを確認", "セキュリティチェック",
+    "ロボットではない", "不審なアクティビティ",
 )
 DISABLED_TEXT = (
     "you do not have an account", "deleted or deactivated", "account has been deactivated",
@@ -39,6 +43,7 @@ REJECTED_TEXT = (
 FAST_POLL_INTERVAL = 0.25
 WAIT_POLL_INTERVAL = 0.5
 CHALLENGE_POLL_INTERVAL = 1.0
+CHALLENGE_TIMEOUT = 120.0
 EMAIL_RETRY_INTERVAL = 15.0
 INSPECT_SCRIPT = r"""() => {
     const visible = element => {
@@ -52,7 +57,36 @@ INSPECT_SCRIPT = r"""() => {
     const password = first("input[type='password'],input[name='password'],input[autocomplete='new-password'],input[autocomplete='current-password']");
     const code = first("input[name='code'],input[autocomplete='one-time-code'],input[inputmode='numeric'][maxlength='6']");
     const name = first("input[name='name'],input[name='fullName'],input[name='full_name'],input[id='name'],input[id='fullName'],input[id='full-name'],input[autocomplete='name'],input[placeholder='Full name'],input[placeholder='Name'],input[placeholder='全名'],input[placeholder='姓名'],input[aria-label='Full name'],input[aria-label='Name'],input[aria-label='全名'],input[aria-label='姓名']");
-    const profile = first("input[name='age'],input[name='birthdate'],input[name='birthday'],input[name='date_of_birth'],input[name='dob'],input[id='age'],input[id*='birth'],input[autocomplete='bday'],input[type='date'],input[placeholder='Age'],input[placeholder='年龄'],input[placeholder='生日'],input[aria-label='Age'],input[aria-label='年龄'],input[aria-label='生日']");
+    const profile = first("input[name='age'],input[name='birthdate'],input[name='birthday'],input[name='date_of_birth'],input[name='dob'],input[id='age'],input[id*='birth'],input[autocomplete='bday'],input[type='date'],input[placeholder='Age'],input[placeholder='年龄'],input[placeholder='生日'],input[placeholder='出生日期'],input[placeholder='出生年月日'],input[aria-label='Age'],input[aria-label='年龄'],input[aria-label='生日'],input[aria-label='出生日期'],input[aria-label='出生年月日'],input[placeholder='YYYY/MM/DD'],input[placeholder='YYYY-MM-DD'],input[placeholder='MM/DD/YYYY'],input[aria-label='YYYY/MM/DD'],input[aria-label='YYYY-MM-DD'],input[aria-label='MM/DD/YYYY']");
+    const dateGroups = Array.from(document.querySelectorAll("[role='group']")).filter(visible);
+    const segmentKind = element => {
+        const metadata = [element.dataset.type, element.getAttribute('aria-label')].filter(Boolean).join(' ').toLowerCase();
+        if (/year|yyyy|年|年份|年号|年號/.test(metadata)) return 'year';
+        if (/month|mm|月|月份/.test(metadata)) return 'month';
+        if (/day|dd|日|日期/.test(metadata)) return 'day';
+        const maximum = Number(element.getAttribute('aria-valuemax') || 0);
+        if (maximum > 31) return 'year';
+        if (maximum === 12) return 'month';
+        if (maximum >= 28 && maximum <= 31) return 'day';
+        return '';
+    };
+    const groupSegments = group => Array.from(group.querySelectorAll(":scope > [role='spinbutton'][data-type],:scope > [role='spinbutton'][aria-label],:scope > [contenteditable='true'][data-type]")).filter(visible);
+    const dateGroup = dateGroups.find(group => {
+        const kinds = new Set(groupSegments(group).map(segmentKind).filter(Boolean));
+        return ['year', 'month', 'day'].every(kind => kinds.has(kind));
+    }) || null;
+    const dateSegments = dateGroup ? groupSegments(dateGroup) : [];
+    const segmentValues = {};
+    const segmentKinds = new Set();
+    for (const segment of dateSegments) {
+        const kind = segmentKind(segment);
+        const raw = segment.getAttribute('aria-valuenow') || segment.textContent || '';
+        const digits = String(raw).match(/\d+/)?.[0] || '';
+        if (kind) segmentKinds.add(kind);
+        if (kind && digits) segmentValues[kind] = digits;
+    }
+    const segmentedBirthdate = ['year', 'month', 'day'].every(kind => segmentKinds.has(kind));
+    const segmentedValue = segmentedBirthdate && ['year', 'month', 'day'].every(kind => segmentValues[kind]) ? `${segmentValues.year.padStart(4, '0')}-${segmentValues.month.padStart(2, '0')}-${segmentValues.day.padStart(2, '0')}` : '';
     const actions = Array.from(document.querySelectorAll("button,a,[role='button']")).filter(visible).map(element => (element.innerText || element.textContent || '').trim()).join('\n');
     const alerts = Array.from(document.querySelectorAll("[role='alert'],[aria-live='assertive']")).filter(visible).map(element => (element.innerText || element.textContent || '').trim()).join('\n');
     return {
@@ -65,7 +99,11 @@ INSPECT_SCRIPT = r"""() => {
         code: !!code,
         codeInvalid: !!code && (code.getAttribute('aria-invalid') === 'true' || /invalid|incorrect|wrong|expired|错误|无效|过期|正しくありません|無効|有効期限/i.test(alerts)),
         name: !!name,
-        profileField: profile ? (profile.getAttribute('name') || (profile.type === 'date' ? 'birthdate' : 'age')) : '',
+        nameValue: name ? (name.value || '') : '',
+        profileField: profile ? (profile.getAttribute('name') || (profile.type === 'date' || /birth|生日|出生日期|出生年月日/i.test([profile.id, profile.placeholder, profile.getAttribute('aria-label'), profile.autocomplete].filter(Boolean).join(' ')) ? 'birthdate' : 'age')) : (segmentedBirthdate ? 'birthdate_segments' : ''),
+        profileValue: profile ? (profile.value || '') : segmentedValue,
+        profileInvalid: profile ? (profile.getAttribute('aria-invalid') === 'true' || /invalid|incorrect|required|date of birth|birth date|birthday|错误|无效|必填|出生日期|生年月日|正しく|無効/i.test(alerts)) : dateSegments.some(segment => segment.getAttribute('aria-invalid') === 'true'),
+        profileKey: profile ? [performance.timeOrigin, profile.name, profile.id, profile.type, profile.placeholder, profile.getAttribute('aria-label')].filter(Boolean).join('|') : (segmentedBirthdate ? `${performance.timeOrigin}|birthdate_segments` : ''),
         ready: !!first("textarea[name='prompt-textarea'],#prompt-textarea,[data-testid='composer'],[data-testid='composer-input'],[contenteditable='true'][data-lexical-editor='true']"),
         retry: /try again|retry|重试|再试一次|再試行|もう一度/i.test(actions),
         actions: actions.slice(0, 500),
@@ -105,7 +143,11 @@ class Signals:
     code: bool = False
     code_invalid: bool = False
     name: bool = False
+    name_value: str = ""
     profile_field: str = ""
+    profile_value: str = ""
+    profile_invalid: bool = False
+    profile_key: str = ""
     ready: bool = False
     retry: bool = False
     challenge: bool = False
@@ -222,7 +264,9 @@ async def inspect_page(page: Any) -> Signals:
         document_key=str(values.get("documentKey", "")), email=bool(values.get("email")),
         email_value=str(values.get("emailValue", "")), password=bool(values.get("password")),
         code=bool(values.get("code")), code_invalid=bool(values.get("codeInvalid")),
-        name=bool(values.get("name")), profile_field=str(values.get("profileField", "")),
+        name=bool(values.get("name")), name_value=str(values.get("nameValue", "")),
+        profile_field=str(values.get("profileField", "")), profile_value=str(values.get("profileValue", "")),
+        profile_invalid=bool(values.get("profileInvalid")), profile_key=str(values.get("profileKey", "")),
         ready=bool(values.get("ready")), retry=bool(values.get("retry")),
         challenge=bool(values.get("challenge")), actions=str(values.get("actions", "")),
     )
@@ -357,6 +401,35 @@ class SubmissionGate:
     def ensure_progress(self, now: float, code: str, message: str) -> None:
         if self.submitted_at is not None and now - self.submitted_at >= 30:
             raise SidecarError(code, message, True)
+
+
+@dataclass
+class ProfileSubmissionGate:
+    attempts: int = 0
+    submitted_at: Optional[float] = None
+    submitted_key: str = ""
+    expected_name: str = ""
+    expected_profile: str = ""
+
+    def should_submit(self, signals: Signals, now: float) -> bool:
+        if self.attempts == 0:
+            return True
+        if self.attempts >= 3 or self.submitted_at is None or now - self.submitted_at < 1:
+            return False
+        changed_form = bool(self.submitted_key and signals.profile_key and signals.profile_key != self.submitted_key)
+        rolled_back = signals.name_value != self.expected_name or signals.profile_value != self.expected_profile
+        return signals.profile_invalid or changed_form or rolled_back
+
+    def mark(self, now: float, profile_key: str, expected_name: str, expected_profile: str) -> None:
+        self.attempts += 1
+        self.submitted_at = now
+        self.submitted_key = profile_key
+        self.expected_name = expected_name
+        self.expected_profile = expected_profile
+
+    def ensure_progress(self, now: float) -> None:
+        if self.submitted_at is not None and now - self.submitted_at >= 30:
+            raise SidecarError("profile_stalled", f"profile page did not advance after {self.attempts} submission(s)", True)
 
 
 @dataclass
@@ -498,7 +571,7 @@ class RegistrationFlow:
         self.codes = VerificationCodes(request_code)
         self.email = EmailSubmissionGate()
         self.password = SubmissionGate()
-        self.profile = SubmissionGate()
+        self.profile = ProfileSubmissionGate()
         self.retry = SubmissionGate()
         self.challenge_since: Optional[float] = None
         self.last_state_key = ""
@@ -547,7 +620,7 @@ class RegistrationFlow:
                 self.challenge_since = now
                 await self.log("security check detected; waiting for browser verification")
                 return False
-            if now - self.challenge_since >= 30:
+            if now - self.challenge_since >= CHALLENGE_TIMEOUT:
                 raise SidecarError("challenge_required", "interactive challenge remained after verification wait")
             return False
         self.challenge_since = None
@@ -566,7 +639,7 @@ class RegistrationFlow:
             await self.codes.step(page, signals, state, now)
             return False
         if state == "profile":
-            await self._handle_profile(page, now)
+            await self._handle_profile(page, signals, now)
             return False
         if state != "ready":
             return False
@@ -605,33 +678,151 @@ class RegistrationFlow:
             return
         self.password.ensure_progress(now, "password_stalled", "password page did not advance after submission")
 
-    async def _handle_profile(self, page: Any, now: float) -> None:
-        if self.profile.pending():
-            await self.log("profile submission: filling fields")
-            await fill_value(page, NAME, str(self.payload["full_name"]))
-            field = await actionable(page, PROFILE, editable=True)
-            await fill_profile_field(field, str(self.payload["age"]))
-            await self.log("profile submission: clicking continue")
+    async def _handle_profile(self, page: Any, signals: Signals, now: float) -> None:
+        if self.profile.should_submit(signals, now):
+            await self.log(f"profile submission {self.profile.attempts + 1}/3: filling fields")
+            name_field = await actionable(page, NAME, editable=True)
+            await stable_input_value(name_field, str(self.payload["full_name"]))
+            if signals.profile_field == "birthdate_segments":
+                birthdate = await fill_segmented_birthdate(page, str(self.payload["age"]))
+            else:
+                field = await actionable(page, PROFILE, editable=True)
+                birthdate = await fill_profile_field(field, str(self.payload["age"]))
+            await self.log(f"profile submission {self.profile.attempts + 1}/3: fields stable (birthdate format={birthdate_format(birthdate)})")
             await click_submit(page)
-            self.profile.mark(monotonic_time())
-            await self.log("profile submission: click completed; waiting for navigation")
+            self.profile.mark(monotonic_time(), signals.profile_key, str(self.payload["full_name"]), birthdate)
+            await self.log(f"profile submission {self.profile.attempts}/3: click completed; waiting for navigation")
             return
-        self.profile.ensure_progress(now, "profile_stalled", "profile page did not advance after submission")
+        self.profile.ensure_progress(now)
 
 
-async def fill_profile_field(field: Any, age_value: str) -> None:
+def birthdate_format(value: str) -> str:
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return "YYYY-MM-DD"
+    if re.fullmatch(r"\d{4}/\d{2}/\d{2}", value):
+        return "YYYY/MM/DD"
+    if re.fullmatch(r"\d{2}/\d{2}/\d{4}", value):
+        return "MM/DD/YYYY"
+    return "age"
+
+
+def formatted_birthdate(iso_value: str, current_value: str, attributes: str, native_date: bool) -> str:
+    if native_date:
+        return iso_value
+    year, month, day = iso_value.split("-")
+    if re.fullmatch(r"\d{4}/\d{1,2}/\d{1,2}", current_value.strip()):
+        return f"{year}/{month}/{day}"
+    if re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", current_value.strip()):
+        return f"{month}/{day}/{year}"
+    if re.search(r"yyyy/mm/dd", attributes, re.I):
+        return f"{year}/{month}/{day}"
+    if re.search(r"mm/dd/yyyy", attributes, re.I):
+        return f"{month}/{day}/{year}"
+    return iso_value
+
+
+async def stable_input_value(field: Any, value: str) -> None:
+    await set_input_value(field, value)
+    await field.blur()
+    await asyncio.sleep(0.35)
+    if await field.input_value() == value:
+        return
+    await field.fill(value)
+    await field.blur()
+    await asyncio.sleep(0.35)
+    if await field.input_value() == value:
+        return
+    await field.click()
+    await field.press("Control+A")
+    await field.type(value, delay=50)
+    await field.blur()
+    await asyncio.sleep(0.35)
+    if await field.input_value() != value:
+        raise SidecarError("input_stalled", "profile input did not retain the requested value", True)
+
+
+async def date_segment_kind(segment: Any) -> str:
+    segment_type = str((await segment.get_attribute("data-type")) or "").lower()
+    aria_label = str((await segment.get_attribute("aria-label")) or "").lower()
+    metadata = f"{segment_type} {aria_label}"
+    if re.search(r"year|yyyy|年|年份|年号|年號", metadata):
+        return "year"
+    if re.search(r"month|mm|月|月份", metadata):
+        return "month"
+    if re.search(r"day|dd|日|日期", metadata):
+        return "day"
+    maximum = str((await segment.get_attribute("aria-valuemax")) or "")
+    if maximum.isdigit() and int(maximum) > 31:
+        return "year"
+    if maximum == "12":
+        return "month"
+    if maximum.isdigit() and 28 <= int(maximum) <= 31:
+        return "day"
+    return ""
+
+
+async def date_segment_value(segment: Any) -> str:
+    raw = str((await segment.get_attribute("aria-valuenow")) or await segment.text_content() or "")
+    match = re.search(r"\d+", raw)
+    return match.group(0) if match else ""
+
+
+async def fill_date_segment(segment: Any, value: str) -> None:
+    await segment.click()
+    await segment.type(value, delay=50)
+    await asyncio.sleep(0.15)
+    current = await date_segment_value(segment)
+    if not current.isdigit() or int(current) != int(value):
+        raise SidecarError("input_stalled", "birthdate segment did not retain the requested value", True)
+
+
+async def fill_segmented_birthdate(page: Any, age_value: str) -> str:
+    iso_value = birthdate_from_age(age_value)
+    values = dict(zip(("year", "month", "day"), iso_value.split("-")))
+    segments: dict[str, Any] = {}
+    groups = page.locator(DATE_GROUPS)
+    for group_index in range(await groups.count()):
+        group = groups.nth(group_index)
+        if not await group.is_visible():
+            continue
+        candidates = group.locator(DATE_SEGMENTS)
+        grouped: dict[str, Any] = {}
+        for segment_index in range(await candidates.count()):
+            segment = candidates.nth(segment_index)
+            if not await segment.is_visible():
+                continue
+            kind = await date_segment_kind(segment)
+            if kind and kind not in grouped:
+                grouped[kind] = segment
+        if set(grouped) == set(values):
+            segments = grouped
+            break
+    if set(segments) != set(values):
+        raise SidecarError("element_timeout", "segmented birthdate controls are incomplete", True)
+    for kind in ("year", "month", "day"):
+        await fill_date_segment(segments[kind], values[kind])
+    await asyncio.sleep(0.35)
+    for kind in ("year", "month", "day"):
+        current = await date_segment_value(segments[kind])
+        if not current.isdigit() or int(current) != int(values[kind]):
+            raise SidecarError("input_stalled", "segmented birthdate did not remain stable", True)
+    return iso_value
+
+
+async def fill_profile_field(field: Any, age_value: str) -> str:
     metadata = {
         key: str((await field.get_attribute(key)) or "").lower()
         for key in ("name", "id", "type", "autocomplete", "placeholder", "aria-label")
     }
+    current_value = await field.input_value()
     attributes = " ".join(metadata.values())
     is_birthdate = metadata["type"] == "date" or any(
-        marker in attributes for marker in ("birth", "birthday", "date_of_birth", "dob", "bday")
+        marker in attributes for marker in ("birth", "birthday", "date_of_birth", "dob", "bday", "生日", "出生日期", "出生年月日", "yyyy/mm/dd", "yyyy-mm-dd", "mm/dd/yyyy")
     )
-    value = birthdate_from_age(age_value) if is_birthdate else (age_value if age_value.isdigit() else "30")
-    await set_input_value(field, value)
-    if await field.input_value() != value:
-        await field.fill(value)
-    if await field.input_value() != value:
-        raise SidecarError("input_stalled", "profile input did not retain the requested value", True)
-    await field.blur()
+    if is_birthdate:
+        iso_value = birthdate_from_age(age_value)
+        value = formatted_birthdate(iso_value, current_value, attributes, metadata["type"] == "date")
+    else:
+        value = age_value if age_value.isdigit() else "30"
+    await stable_input_value(field, value)
+    return value

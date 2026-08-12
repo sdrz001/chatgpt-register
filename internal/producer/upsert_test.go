@@ -250,6 +250,72 @@ func TestFailedFissionRetriesThenConsumesOneSlot(t *testing.T) {
 	}
 }
 
+func TestUpsertClearsStaleFailureShotOnRetryAndSuccess(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Registration{}); err != nil {
+		t.Fatal(err)
+	}
+	existing := models.Registration{Email: "retry@example.test", Status: "register_failed", Shot: []byte("old-shot")}
+	if err := database.Create(&existing).Error; err != nil {
+		t.Fatal(err)
+	}
+	producer := &Producer{db: database}
+	producer.upsert(models.Registration{Email: existing.Email, Status: "registering"})
+	var reloaded models.Registration
+	if err := database.First(&reloaded, existing.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Shot) != 0 {
+		t.Fatalf("retry retained stale shot: %d bytes", len(reloaded.Shot))
+	}
+	if err := database.Model(&reloaded).Update("shot", []byte("new-failure-shot")).Error; err != nil {
+		t.Fatal(err)
+	}
+	producer.upsert(models.Registration{Email: existing.Email, Status: "registered", AuthData: `{"access_token":"new"}`, ATStatus: "valid"})
+	reloaded = models.Registration{}
+	if err := database.First(&reloaded, existing.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Shot) != 0 {
+		t.Fatalf("success retained stale shot: %d bytes", len(reloaded.Shot))
+	}
+}
+
+func TestUpsertWithNewAuthResetsTrialEligibility(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Registration{}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	existing := models.Registration{
+		Email: "trial@example.test", Status: "registered", AuthData: `{"access_token":"old"}`,
+		TrialStatus: "eligible", TrialPlan: "plus", TrialLabel: "1-month free trial",
+		TrialPercent: 100, TrialPeriods: 1, TrialPeriodUnit: "month", TrialAutoRenew: true,
+		TrialCheckedAt: &now,
+	}
+	if err := database.Create(&existing).Error; err != nil {
+		t.Fatal(err)
+	}
+	producer := &Producer{db: database}
+	producer.upsert(models.Registration{
+		Email: existing.Email, Status: "registered", AuthData: `{"access_token":"new"}`,
+		ATStatus: "valid", TrialStatus: "eligible",
+	})
+	var reloaded models.Registration
+	if err := database.First(&reloaded, existing.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.TrialStatus != "unchecked" || reloaded.TrialPlan != "" || reloaded.TrialLabel != "" || reloaded.TrialPercent != 0 || reloaded.TrialPeriods != 0 || reloaded.TrialPeriodUnit != "" || reloaded.TrialAutoRenew || reloaded.TrialCheckedAt != nil {
+		t.Fatalf("trial was not reset: %+v", reloaded)
+	}
+}
+
 func TestUpsertPersistsCategoryWithoutClearingIntegrationState(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

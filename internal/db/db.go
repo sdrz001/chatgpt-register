@@ -20,6 +20,7 @@ func Init(path string) (*gorm.DB, error) {
 	normalizeLegacyStatuses(db)
 	reclaimOrphanRegistering(db)
 	reclaimOrphanIntegrations(db)
+	reclaimOrphanATChecks(db)
 	backfillRegistrationMailboxIDs(db)
 	categorysync.BackfillRegistrations(db)
 	return db, nil
@@ -40,6 +41,11 @@ func reclaimOrphanIntegrations(db *gorm.DB) {
 		Updates(map[string]any{"sub2api_status": "failed", "sub2api_error": "程序重启中断，可重新导入"})
 	db.Model(&models.SMSActivation{}).Where("status IN ?", []string{"allocated", "waiting"}).
 		Updates(map[string]any{"status": "orphaned", "error": "程序重启中断，需核对供应商订单"})
+}
+
+func reclaimOrphanATChecks(db *gorm.DB) {
+	db.Model(&models.Registration{}).Where("at_status = ? OR trial_status = ?", "checking", "checking").
+		Updates(map[string]any{"at_status": "unchecked", "at_error": "", "trial_status": "unchecked", "trial_error": ""})
 }
 
 // normalizeLegacyStatuses 把旧的 AdSkull 验证态注册记录迁移到新的生产态。

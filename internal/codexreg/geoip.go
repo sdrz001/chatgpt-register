@@ -168,21 +168,3 @@ func localeForCountry(cc string) (locale, acceptLang string) {
 		return "en_US", "en-US,en;q=0.9"
 	}
 }
-
-// blockResources 拦截并放弃图片/字体/媒体请求，降低带宽占用与被检测面。
-func blockResources(page *rod.Page, in Input) func() {
-	router := page.HijackRequests()
-	router.MustAdd("*", func(ctx *rod.Hijack) {
-		switch ctx.Request.Type() {
-		case proto.NetworkResourceTypeImage,
-			proto.NetworkResourceTypeMedia,
-			proto.NetworkResourceTypeFont:
-			ctx.Response.Fail(proto.NetworkErrorReasonBlockedByClient)
-		default:
-			ctx.ContinueRequest(&proto.FetchContinueRequest{})
-		}
-	})
-	go router.Run()
-	in.logf("🚫 已开启资源屏蔽: image/media/font")
-	return router.MustStop
-}

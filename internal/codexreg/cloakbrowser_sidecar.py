@@ -49,6 +49,7 @@ PROXY_RE = re.compile(r"(?i)(https?|socks5)://[^/@\s]+@")
 JWT_RE = re.compile(r"\b[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\b")
 TOKEN_RE = re.compile(r"(?i)((?:access[_-]?token)\s*[:=]\s*)[^\s,;]+")
 BEARER_RE = re.compile(r"(?i)(bearer\s+)[^\s,;]+")
+DATE_RE = re.compile(r"(?<!\d)(?:\d{4}\s*[-/]\s*\d{1,2}\s*[-/]\s*\d{1,2}|\d{1,2}\s*/\s*\d{1,2}\s*/\s*\d{4})(?!\d)")
 CODE_RE = re.compile(r"\b[0-9]{4,8}\b")
 PROXY_SCHEMES = {"http", "https", "socks5"}
 
@@ -88,6 +89,7 @@ def redact_sensitive(value: str, secrets: Sequence[str] = ()) -> str:
     text = JWT_RE.sub("[token]", text)
     text = TOKEN_RE.sub(r"\1[redacted]", text)
     text = BEARER_RE.sub(r"\1[redacted]", text)
+    text = DATE_RE.sub("[date]", text)
     return CODE_RE.sub("[code]", text)
 
 
@@ -289,24 +291,12 @@ def close_late_context(registration: Registration, task: asyncio.Task[Any]) -> N
         pass
 
 
-async def route_without_images(route: Any, request: Any) -> None:
-    if request.resource_type == "image":
-        await route.abort()
-        return
-    await route.continue_()
-
-
-async def block_images(context: Any) -> None:
-    await context.route("**/*", route_without_images)
-
-
 async def browse(registration: Registration) -> str:
     root = Path(__file__).resolve().parents[2] / ".cloakbrowser-profiles"
     root.mkdir(exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix=f"task-{registration.request_id[:12]}-", dir=root))
     try:
         context = await launch_context(registration, profile)
-        await block_images(context)
         context.on("response", lambda response: observe_response(registration, response))
         context.on("requestfailed", lambda request: observe_request_failure(registration, request))
         page = context.pages[-1] if context.pages else await context.new_page()
@@ -424,8 +414,6 @@ def network_response_message(response: Any) -> Optional[str]:
 
 
 def network_failure_message(request: Any) -> Optional[str]:
-    if request.resource_type == "image":
-        return None
     parsed = urlsplit(request.url)
     host = (parsed.hostname or "").lower()
     if host != "auth.openai.com" and host != "chatgpt.com" and not host.endswith(".chatgpt.com"):

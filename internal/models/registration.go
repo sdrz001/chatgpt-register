@@ -30,6 +30,15 @@ type Registration struct {
 	ATError            string     `gorm:"column:at_error;type:text" json:"at_error"`
 	ATCheckedAt        *time.Time `gorm:"column:at_checked_at" json:"at_checked_at"`
 	ATExpiresAt        *time.Time `gorm:"column:at_expires_at" json:"at_expires_at"`
+	TrialStatus        string     `gorm:"column:trial_status;size:16;not null;default:unchecked;index" json:"trial_status"`
+	TrialPlan          string     `gorm:"column:trial_plan;size:32" json:"trial_plan"`
+	TrialLabel         string     `gorm:"column:trial_label;size:128" json:"trial_label"`
+	TrialPercent       int        `gorm:"column:trial_percent;not null;default:0" json:"trial_percent"`
+	TrialPeriods       int        `gorm:"column:trial_periods;not null;default:0" json:"trial_periods"`
+	TrialPeriodUnit    string     `gorm:"column:trial_period_unit;size:16" json:"trial_period_unit"`
+	TrialAutoRenew     bool       `gorm:"column:trial_auto_renew;not null;default:false" json:"trial_auto_renew"`
+	TrialError         string     `gorm:"column:trial_error;type:text" json:"trial_error"`
+	TrialCheckedAt     *time.Time `gorm:"column:trial_checked_at" json:"trial_checked_at"`
 	PlusMailStatus     string     `gorm:"column:plus_mail_status;size:16;not null;default:unchecked;index" json:"plus_mail_status"`
 	PlusMailSubject    string     `gorm:"column:plus_mail_subject;type:text" json:"plus_mail_subject"`
 	PlusMailError      string     `gorm:"column:plus_mail_error;type:text" json:"plus_mail_error"`

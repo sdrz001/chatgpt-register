@@ -29,6 +29,15 @@ func TestInitMigratesIntegrationModels(t *testing.T) {
 		"at_error",
 		"at_checked_at",
 		"at_expires_at",
+		"trial_status",
+		"trial_plan",
+		"trial_label",
+		"trial_percent",
+		"trial_periods",
+		"trial_period_unit",
+		"trial_auto_renew",
+		"trial_error",
+		"trial_checked_at",
 		"category_id",
 		"codex_status",
 		"codex_error",
@@ -94,6 +103,43 @@ func TestInitBackfillsRegistrationCategoryFromMailbox(t *testing.T) {
 	}
 	if category.Scope != "account" || category.Name != mailboxCategory.Name {
 		t.Fatalf("category=%+v", category)
+	}
+}
+
+func TestInitReclaimsOrphanATCheckStates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	database, err := Init(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration := models.Registration{
+		Email: "at-check@example.test", Status: "registered",
+		ATStatus: "checking", ATError: "old", TrialStatus: "checking", TrialError: "old",
+	}
+	if err := database.Create(&registration).Error; err != nil {
+		t.Fatal(err)
+	}
+	firstSQL, err := database.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := firstSQL.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Init(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSQL, err := database.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondSQL.Close()
+	if err := database.First(&registration, registration.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if registration.ATStatus != "unchecked" || registration.TrialStatus != "unchecked" || registration.ATError != "" || registration.TrialError != "" {
+		t.Fatalf("registration=%+v", registration)
 	}
 }
 

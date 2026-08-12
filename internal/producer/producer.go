@@ -488,7 +488,7 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 		Email: email, MailboxID: mb.ID, Password: password, Proxy: accountProxy,
 		Status: "registered", IsMother: isMother, Note: note, CategoryID: categoryID,
 		AuthData: string(authBytes), AccountID: res.AccountID,
-		UserID: res.UserID, PlanType: res.PlanType, ATStatus: "valid",
+		UserID: res.UserID, PlanType: res.PlanType, ATStatus: "valid", TrialStatus: "unchecked",
 		ATCheckedAt: &now, ATExpiresAt: expiresAt, Log: logBuf.String(),
 	})
 	values, configErr := integrationcfg.Load(p.db)
@@ -729,7 +729,11 @@ func (p *Producer) upsert(reg models.Registration) {
 			"is_mother": reg.IsMother, "note": reg.Note, "mailbox_id": reg.MailboxID,
 			"proxy": reg.Proxy, "category_id": reg.CategoryID,
 		}
+		if reg.Status == "registering" {
+			updates["shot"] = nil
+		}
 		if reg.AuthData != "" {
+			updates["shot"] = nil
 			updates["auth_data"] = reg.AuthData
 			updates["account_id"] = reg.AccountID
 			updates["user_id"] = reg.UserID
@@ -738,6 +742,15 @@ func (p *Producer) upsert(reg models.Registration) {
 			updates["at_error"] = reg.ATError
 			updates["at_checked_at"] = reg.ATCheckedAt
 			updates["at_expires_at"] = reg.ATExpiresAt
+			updates["trial_status"] = "unchecked"
+			updates["trial_plan"] = ""
+			updates["trial_label"] = ""
+			updates["trial_percent"] = 0
+			updates["trial_periods"] = 0
+			updates["trial_period_unit"] = ""
+			updates["trial_auto_renew"] = false
+			updates["trial_error"] = ""
+			updates["trial_checked_at"] = nil
 		}
 		if reg.Log != "" {
 			updates["log"] = reg.Log

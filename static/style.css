@@ -482,6 +482,10 @@ select.px-input option { background: #fff; }
 .badge.at-checking { color: var(--cyan); background: rgba(8, 145, 178, .13); }
 .badge.at-error { color: var(--amber); background: rgba(217, 119, 6, .13); }
 .badge.at-unchecked { color: var(--text-3); background: rgba(120, 130, 160, .12); }
+.badge.trial-eligible { color: var(--green); background: rgba(22, 163, 74, .13); }
+.badge.trial-ineligible, .badge.trial-unchecked { color: var(--text-3); background: rgba(120, 130, 160, .12); }
+.badge.trial-checking { color: var(--cyan); background: rgba(8, 145, 178, .13); }
+.badge.trial-error { color: var(--amber); background: rgba(217, 119, 6, .13); }
 
 .plan-badge, .category-chip {
   display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px;
