@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -14,6 +15,8 @@ import (
 )
 
 const defaultProxyPoolSetting = "default_proxy_pool_id"
+
+var errEmptyDefault = errors.New("默认代理池至少需要一个代理")
 
 func proxyPoolLines(raw string) ([]string, error) {
 	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == '\n' || r == '\r' || r == ',' })
@@ -153,7 +156,7 @@ func (h *Handler) ProxyPoolUpdate(c *gin.Context) {
 	err = h.DB.Transaction(func(tx *gorm.DB) error {
 		currentDefaultID := defaultProxyPoolIDFrom(tx)
 		if count == 0 && ((input.IsDefault != nil && *input.IsDefault) || (input.IsDefault == nil && currentDefaultID == pool.ID)) {
-			return fmt.Errorf("默认代理池至少需要一个代理")
+			return errEmptyDefault
 		}
 		if err := tx.Model(&pool).Updates(map[string]any{"name": name, "proxies": proxies}).Error; err != nil {
 			return err
@@ -170,7 +173,7 @@ func (h *Handler) ProxyPoolUpdate(c *gin.Context) {
 		return h.setDefaultProxyPoolID(tx, defaultID)
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "默认代理池") {
+		if errors.Is(err, errEmptyDefault) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		} else {
 			c.JSON(http.StatusConflict, gin.H{"error": "代理池名称已存在"})

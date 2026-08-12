@@ -101,9 +101,9 @@ func main() {
 		api.GET("/proxy-pools", h.ProxyPoolList)
 		api.GET("/proxy-pools/:id", h.ProxyPoolGet)
 		api.POST("/proxy-pools", h.ProxyPoolCreate)
+		api.PUT("/proxy-pools/default", h.ProxyPoolSetDefault)
 		api.PUT("/proxy-pools/:id", h.ProxyPoolUpdate)
 		api.DELETE("/proxy-pools/:id", h.ProxyPoolDelete)
-		api.PUT("/proxy-pools/default", h.ProxyPoolSetDefault)
 		api.POST("/proxy/test", h.ProxyTest)
 	}
 
