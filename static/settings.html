@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>系统设置 · ChatGPT 注册管理</title>
-<link rel="stylesheet" href="/static/style.css?v=15">
+<link rel="stylesheet" href="/static/style.css?v=18">
 </head>
 <body data-page="settings">
 <div class="layout">
@@ -84,24 +84,44 @@
             <p>注册时通过代理访问，降低风控</p>
           </div>
         </div>
-        <label class="switch-row">
-          <input id="set-proxy-enabled" type="checkbox">
-          <span class="switch-ui"></span>
-          <span class="switch-label">启用代理</span>
-        </label>
-        <div class="field">
-          <div class="field-label-row">
-            <label>代理列表</label>
-            <span id="proxy-count" class="count-badge">识别到 0 个代理</span>
+        <div class="proxy-pool-toolbar">
+          <select id="set-proxy-pool" class="px-input" onchange="selectProxyPool(this.value)">
+            <option value="">选择代理池</option>
+          </select>
+          <button class="px-btn ghost" type="button" onclick="createProxyPool()">新建</button>
+          <button id="delete-proxy-pool-btn" class="px-btn danger" type="button" onclick="deleteProxyPool()">删除</button>
+        </div>
+        <div id="proxy-pool-editor" style="display:none">
+          <div class="settings-form-grid">
+            <div class="field">
+              <label>代理池名称</label>
+              <input id="set-proxy-pool-name" class="px-input" maxlength="64" placeholder="例如：日本节点">
+            </div>
+            <div class="field">
+              <label>注册默认代理池</label>
+              <span class="field-hint">账户页首次打开时自动选择；每次注册仍可临时切换其他池或直连</span>
+              <label class="switch-row">
+                <input id="set-proxy-pool-default" type="checkbox">
+                <span class="switch-ui"></span>
+                <span class="switch-label">默认用于注册</span>
+              </label>
+            </div>
           </div>
-          <span class="field-hint">每行一个，支持 user:pass@host:port、host:port:user:pass、host:port，以及带 http(s):// 或 socks5:// 前缀的格式</span>
-          <textarea id="set-proxy-list" class="px-input proxy-textarea" rows="5" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" oninput="updateProxyCount()" placeholder="user:pass@1.2.3.4:8080&#10;1.2.3.4:8080:user:pass&#10;http://user:pass@1.2.3.4:8080"></textarea>
+          <div class="field">
+            <div class="field-label-row">
+              <label>代理列表</label>
+              <span id="proxy-count" class="count-badge">识别到 0 个代理</span>
+            </div>
+            <span class="field-hint">每行一个，支持 user:pass@host:port、host:port:user:pass、host:port，以及带 http(s)://、https:// 或 socks5:// 前缀的格式</span>
+            <textarea id="set-proxy-list" class="px-input proxy-textarea" rows="8" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" oninput="updateProxyCount()" placeholder="user:pass@1.2.3.4:8080&#10;1.2.3.4:8080:user:pass&#10;http://user:pass@1.2.3.4:8080"></textarea>
+          </div>
+          <div id="proxy-test-result" class="proxy-result" style="display:none"></div>
+          <div class="settings-foot">
+            <button id="proxy-test-btn" class="px-btn ghost" onclick="testProxy()">测试首个代理</button>
+            <button class="px-btn primary" onclick="saveProxyPool()">保存当前代理池</button>
+          </div>
         </div>
-        <div id="proxy-test-result" class="proxy-result" style="display:none"></div>
-        <div class="settings-foot">
-          <button id="proxy-test-btn" class="px-btn ghost" onclick="testProxy()">测试代理</button>
-          <button class="px-btn primary" onclick="saveProxy()">保存代理</button>
-        </div>
+        <div id="proxy-pool-empty" class="proxy-pool-empty">暂无代理池，点击“新建”创建；旧版代理配置会自动迁移为默认代理池。</div>
       </div>
 
       <div class="px-panel settings-card">
@@ -267,6 +287,9 @@
 <script src="/static/layout.js"></script>
 <script>
 let smsMeta = {};
+let proxyPools = [];
+let currentProxyPoolID = 0;
+let defaultProxyPoolID = 0;
 
 async function loadSettings() {
   const r = await api('/api/settings');
@@ -280,8 +303,6 @@ async function loadSettings() {
   updateBrowserModeLabel();
   document.getElementById('set-at-auto-check').checked = d.at_auto_check !== '0';
   updateATCheckModeLabel();
-  document.getElementById('set-proxy-enabled').checked = d.proxy_enabled === '1';
-  document.getElementById('set-proxy-list').value = d.proxy_list || '';
   document.getElementById('set-codex-auto-authorize').checked = d.codex_auto_authorize === '1';
   document.getElementById('set-sms-platform').value = d.sms_platform || 'hero-sms';
   document.getElementById('set-sms-api-key').value = '';
@@ -299,7 +320,6 @@ async function loadSettings() {
   document.getElementById('set-sub2api-priority').value = d.sub2api_priority || '1';
   document.getElementById('set-sub2api-timeout').value = d.sub2api_timeout || '60';
   fillSub2APIGroups([], parseIDList(d.sub2api_group_ids));
-  updateProxyCount();
   syncSelect('set-browser-backend');
   syncSelect('set-sms-platform');
   syncSelect('set-sms-country');
@@ -373,18 +393,82 @@ async function testProxy() {
   }
 }
 
-async function saveProxy() {
-  const body = {
-    proxy_enabled: document.getElementById('set-proxy-enabled').checked ? '1' : '0',
-    proxy_list: document.getElementById('set-proxy-list').value.trim(),
-  };
-  const r = await api('/api/settings', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+function rebuildProxyPoolSelect() {
+  const select = document.getElementById('set-proxy-pool');
+  select.innerHTML = '<option value="">选择代理池</option>' + proxyPools.map(pool =>
+    '<option value="' + pool.id + '">' + esc(pool.name + ' (' + (Number(pool.proxy_count) || 0) + ')') + '</option>').join('');
+  select.value = currentProxyPoolID ? String(currentProxyPoolID) : '';
+  if (select._rebuild) select._rebuild();
+  document.getElementById('proxy-pool-editor').style.display = currentProxyPoolID ? '' : 'none';
+  document.getElementById('proxy-pool-empty').style.display = proxyPools.length ? 'none' : '';
+  document.getElementById('delete-proxy-pool-btn').disabled = !currentProxyPoolID;
+}
+
+async function loadProxyPools(preferredID) {
+  const r = await api('/api/proxy-pools');
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '代理池加载失败', true);
+  proxyPools = d.data || [];
+  defaultProxyPoolID = Number(d.default_proxy_pool_id) || 0;
+  const desired = Number(preferredID) || currentProxyPoolID || defaultProxyPoolID || Number(proxyPools[0]?.id) || 0;
+  currentProxyPoolID = proxyPools.some(pool => Number(pool.id) === desired) ? desired : 0;
+  rebuildProxyPoolSelect();
+  if (currentProxyPoolID) await selectProxyPool(currentProxyPoolID);
+}
+
+async function selectProxyPool(value) {
+  const id = Number(value) || 0;
+  currentProxyPoolID = id;
+  rebuildProxyPoolSelect();
+  if (!id) return;
+  const r = await api('/api/proxy-pools/' + id);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '代理池读取失败', true);
+  document.getElementById('set-proxy-pool-name').value = d.name || '';
+  document.getElementById('set-proxy-list').value = d.proxies || '';
+  document.getElementById('set-proxy-pool-default').checked = id === defaultProxyPoolID;
+  document.getElementById('proxy-test-result').style.display = 'none';
+  updateProxyCount();
+}
+
+async function createProxyPool() {
+  const name = prompt('输入新代理池名称');
+  if (name == null || !name.trim()) return;
+  const r = await api('/api/proxy-pools', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name.trim(), proxies: '' }),
   });
-  if (!r.ok) return toast('保存失败', true);
-  toast('代理配置已保存');
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '新建代理池失败', true);
+  toast('代理池已创建');
+  await loadProxyPools(d.id);
+}
+
+async function saveProxyPool() {
+  if (!currentProxyPoolID) return toast('请先选择代理池', true);
+  const r = await api('/api/proxy-pools/' + currentProxyPoolID, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: document.getElementById('set-proxy-pool-name').value.trim(),
+      proxies: document.getElementById('set-proxy-list').value,
+      is_default: document.getElementById('set-proxy-pool-default').checked,
+    }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '代理池保存失败', true);
+  toast('代理池已保存');
+  await loadProxyPools(currentProxyPoolID);
+}
+
+async function deleteProxyPool() {
+  const pool = proxyPools.find(item => Number(item.id) === currentProxyPoolID);
+  if (!pool || !confirm('确定删除代理池“' + pool.name + '”？正在运行的注册任务不受影响。')) return;
+  const r = await api('/api/proxy-pools/' + currentProxyPoolID, { method: 'DELETE' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '删除代理池失败', true);
+  currentProxyPoolID = 0;
+  toast('代理池已删除');
+  await loadProxyPools();
 }
 
 async function saveSettings() {
@@ -577,7 +661,7 @@ async function changePassword() {
   toast('密码已修改');
 }
 
-loadSMSMeta().then(loadSettings);
+Promise.all([loadSMSMeta().then(loadSettings), loadProxyPools()]);
 </script>
 </body>
 </html>

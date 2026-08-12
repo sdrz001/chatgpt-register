@@ -40,6 +40,8 @@ let accTotal = 0;
 let accountCategories = [];
 let mailboxCategories = [];
 let registerMailboxes = [];
+let proxyPools = [];
+let defaultProxyPoolID = 0;
 const registerMailboxSelected = new Set();
 const accSelected = new Set();
 let plusMailChecking = false;
@@ -151,15 +153,22 @@ async function loadAccountCategories() {
 }
 
 async function loadRegisterSources() {
-  const [categoryResponse, mailboxResponse] = await Promise.all([
+  const [categoryResponse, mailboxResponse, proxyPoolResponse] = await Promise.all([
     api('/api/categories?scope=mailbox'),
     api('/api/mailboxes/options'),
+    api('/api/proxy-pools'),
   ]);
   const categoryData = await categoryResponse.json().catch(() => ({}));
   const mailboxData = await mailboxResponse.json().catch(() => ({}));
+  const proxyPoolData = await proxyPoolResponse.json().catch(() => ({}));
   if (categoryResponse.ok) {
     mailboxCategories = categoryData.data || [];
     rebuildRegisterCategorySelect();
+  }
+  if (proxyPoolResponse.ok) {
+    proxyPools = proxyPoolData.data || [];
+    defaultProxyPoolID = Number(proxyPoolData.default_proxy_pool_id) || 0;
+    rebuildRegisterProxyPoolSelect();
   }
   if (!mailboxResponse.ok) return;
   registerMailboxes = mailboxData.data || [];
@@ -315,6 +324,18 @@ function checkSelectedPlusMail() {
   return checkPlusMail([...accSelected]);
 }
 
+function rebuildRegisterProxyPoolSelect() {
+  const select = document.getElementById('register-proxy-pool');
+  if (!select) return;
+  const current = select.dataset.loaded === '1' ? Number(select.value) : defaultProxyPoolID;
+  select.innerHTML = '<option value="0">直连</option>' + proxyPools.filter(pool => Number(pool.proxy_count) > 0).map(pool =>
+    `<option value="${pool.id}">${esc(pool.name)} (${Number(pool.proxy_count)})</option>`
+  ).join('');
+  select.value = [...select.options].some(option => Number(option.value) === current) ? String(current) : '0';
+  select.dataset.loaded = '1';
+  if (select._rebuild) select._rebuild();
+}
+
 function rebuildRegisterCategorySelect() {
   const select = document.getElementById('register-category');
   const current = select.value;
@@ -418,7 +439,9 @@ async function startProduce() {
   const count = parseInt(document.getElementById('register-count').value, 10);
   if (!count || count < 1) return toast('请输入有效注册数量', true);
   const scope = document.getElementById('register-scope').value;
-  const body = { count, scope };
+  const proxyPoolSelect = document.getElementById('register-proxy-pool');
+  const proxyPoolID = Number(proxyPoolSelect.value) || 0;
+  const body = { count, scope, proxy_pool_id: proxyPoolID };
   if (scope === 'category') {
     body.category_id = Number(document.getElementById('register-category').value);
     if (!body.category_id) return toast('请选择邮箱分组', true);
@@ -436,7 +459,7 @@ async function startProduce() {
     const d = await r.json().catch(() => ({}));
     return toast(d.error || '启动注册失败', true);
   }
-  toast('已开始注册 ' + count + ' 个账号');
+  toast('已开始注册 ' + count + ' 个账号 · ' + proxyPoolSelect.options[proxyPoolSelect.selectedIndex].text);
   loadProduce();
   load();
 }

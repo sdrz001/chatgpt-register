@@ -63,22 +63,27 @@ type Config struct {
 }
 
 type Scope struct {
-	CategoryID *uint
-	MailboxIDs []uint
+	CategoryID    *uint
+	MailboxIDs    []uint
+	ProxyPoolID   uint
+	ProxyPoolName string
+	Proxies       []string
 }
 
 // Progress 生产进度快照，供 /api/produce/status 展示。
 type Progress struct {
-	Running    bool      `json:"running"`
-	Target     int       `json:"target"`
-	Pending    int       `json:"pending"`     // 待生产
-	RunningNum int       `json:"running_num"` // 在跑
-	Registered int       `json:"registered"`  // 已注册(成功)
-	Failed     int       `json:"failed"`      // 注册失败(累计)
-	Message    string    `json:"message"`
-	Error      string    `json:"error"`
-	Logs       []string  `json:"logs"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	Running       bool      `json:"running"`
+	Target        int       `json:"target"`
+	Pending       int       `json:"pending"`     // 待生产
+	RunningNum    int       `json:"running_num"` // 在跑
+	Registered    int       `json:"registered"`  // 已注册(成功)
+	Failed        int       `json:"failed"`      // 注册失败(累计)
+	Message       string    `json:"message"`
+	Error         string    `json:"error"`
+	ProxyPoolID   uint      `json:"proxy_pool_id"`
+	ProxyPoolName string    `json:"proxy_pool_name"`
+	Logs          []string  `json:"logs"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type smsLeaseToken struct {
@@ -140,7 +145,11 @@ func (p *Producer) Start(target int, selected Scope) error {
 	if target < 1 {
 		return fmt.Errorf("注册数量必须 ≥ 1")
 	}
-	scope := Scope{MailboxIDs: append([]uint(nil), selected.MailboxIDs...)}
+	scope := Scope{
+		MailboxIDs:  append([]uint(nil), selected.MailboxIDs...),
+		ProxyPoolID: selected.ProxyPoolID, ProxyPoolName: selected.ProxyPoolName,
+		Proxies: append([]string(nil), selected.Proxies...),
+	}
 	if selected.CategoryID != nil {
 		categoryID := *selected.CategoryID
 		scope.CategoryID = &categoryID
@@ -153,7 +162,10 @@ func (p *Producer) Start(target int, selected Scope) error {
 	p.pxMu.Lock()
 	p.pxIdx = 0
 	p.pxMu.Unlock()
-	p.prog = Progress{Running: true, Target: target, Pending: target, Message: "初始化…", UpdatedAt: time.Now()}
+	p.prog = Progress{
+		Running: true, Target: target, Pending: target, Message: "初始化…", UpdatedAt: time.Now(),
+		ProxyPoolID: scope.ProxyPoolID, ProxyPoolName: scope.ProxyPoolName,
+	}
 	go p.run(ctx, target, scope)
 	return nil
 }
@@ -186,11 +198,16 @@ func (p *Producer) run(ctx context.Context, target int, scope Scope) {
 	}()
 
 	cfg := p.loadConfig()
+	cfg.Proxies = append([]string(nil), scope.Proxies...)
 	backendName := "Go Rod"
 	if cfg.BrowserBackend == codexreg.BackendCloakBrowser {
 		backendName = "Python CloakBrowser"
 	}
-	p.logf("开始注册，目标 %d 个账号（每邮箱母号+%d 裂变，并发 %d，浏览器 %s）", target, cfg.FissionCount, cfg.MaxConcurrency, backendName)
+	proxyPoolName := scope.ProxyPoolName
+	if proxyPoolName == "" {
+		proxyPoolName = "直连"
+	}
+	p.logf("开始注册，目标 %d 个账号（每邮箱母号+%d 裂变，并发 %d，浏览器 %s，代理池 %s · %d 个节点）", target, cfg.FissionCount, cfg.MaxConcurrency, backendName, proxyPoolName, len(cfg.Proxies))
 
 	sem := make(chan struct{}, cfg.MaxConcurrency)
 	var wg sync.WaitGroup
@@ -702,9 +719,6 @@ func (p *Producer) loadConfig() Config {
 	}
 	if cfg.FissionCount < 0 {
 		cfg.FissionCount = defaultFissionCount
-	}
-	if p.getSetting("proxy_enabled") == "1" {
-		cfg.Proxies = proxyList(p.getSetting("proxy_list"))
 	}
 	return cfg
 }

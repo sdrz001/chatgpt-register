@@ -99,10 +99,11 @@ func buildCredentials(authData, email string) map[string]any {
 }
 
 type produceInput struct {
-	Count      int    `json:"count"`
-	Scope      string `json:"scope"`
-	CategoryID *uint  `json:"category_id"`
-	MailboxIDs []uint `json:"mailbox_ids"`
+	Count       int    `json:"count"`
+	Scope       string `json:"scope"`
+	CategoryID  *uint  `json:"category_id"`
+	MailboxIDs  []uint `json:"mailbox_ids"`
+	ProxyPoolID *uint  `json:"proxy_pool_id"`
 }
 
 // Produce 启动一次注册任务。
@@ -114,6 +115,10 @@ func (h *Handler) Produce(c *gin.Context) {
 	}
 	scope, err := h.validateProduceScope(in)
 	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.applyProduceProxyPool(&scope, in.ProxyPoolID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -161,6 +166,31 @@ func (h *Handler) validateProduceScope(in produceInput) (producer.Scope, error) 
 	default:
 		return producer.Scope{}, fmt.Errorf("注册范围无效")
 	}
+}
+
+func (h *Handler) applyProduceProxyPool(scope *producer.Scope, requestedID *uint) error {
+	poolID := h.defaultProxyPoolID()
+	if requestedID != nil {
+		poolID = *requestedID
+	}
+	if poolID == 0 {
+		return nil
+	}
+	var pool models.ProxyPool
+	if err := h.DB.First(&pool, poolID).Error; err != nil {
+		return fmt.Errorf("所选代理池不存在")
+	}
+	proxies, err := proxyPoolLines(pool.Proxies)
+	if err != nil {
+		return err
+	}
+	if len(proxies) == 0 {
+		return fmt.Errorf("所选代理池没有可用代理")
+	}
+	scope.ProxyPoolID = pool.ID
+	scope.ProxyPoolName = pool.Name
+	scope.Proxies = append([]string(nil), proxies...)
+	return nil
 }
 
 func uniqueMailboxIDs(ids []uint) []uint {

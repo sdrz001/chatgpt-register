@@ -1,6 +1,10 @@
 package db
 
 import (
+	"errors"
+	"strconv"
+	"strings"
+
 	"chatgpt-register/internal/categorysync"
 	"chatgpt-register/internal/emailalias"
 	"chatgpt-register/internal/models"
@@ -14,7 +18,7 @@ func Init(path string) (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := db.AutoMigrate(&models.Category{}, &models.Registration{}, &models.SMSActivation{}, &models.Mailbox{}, &models.Setting{}, &models.Admin{}); err != nil {
+	if err := db.AutoMigrate(&models.ProxyPool{}, &models.Category{}, &models.Registration{}, &models.SMSActivation{}, &models.Mailbox{}, &models.Setting{}, &models.Admin{}); err != nil {
 		return nil, err
 	}
 	normalizeLegacyStatuses(db)
@@ -23,6 +27,9 @@ func Init(path string) (*gorm.DB, error) {
 	reclaimOrphanATChecks(db)
 	backfillRegistrationMailboxIDs(db)
 	categorysync.BackfillRegistrations(db)
+	if err := migrateLegacyProxyPool(db); err != nil {
+		return nil, err
+	}
 	return db, nil
 }
 
@@ -60,6 +67,34 @@ func normalizeLegacyStatuses(db *gorm.DB) {
 	for oldStatus, newStatus := range regStatusMap {
 		db.Model(&models.Registration{}).Where("status = ?", oldStatus).Update("status", newStatus)
 	}
+}
+
+func migrateLegacyProxyPool(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&models.ProxyPool{}).Count(&count).Error; err != nil || count > 0 {
+			return err
+		}
+		var list models.Setting
+		if err := tx.Where("key = ?", "proxy_list").First(&list).Error; errors.Is(err, gorm.ErrRecordNotFound) || strings.TrimSpace(list.Value) == "" {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		var enabled models.Setting
+		if err := tx.Where("key = ?", "proxy_enabled").First(&enabled).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		pool := models.ProxyPool{Name: "默认代理池", Proxies: strings.TrimSpace(list.Value)}
+		if err := tx.Create(&pool).Error; err != nil {
+			return err
+		}
+		defaultID := "0"
+		if strings.TrimSpace(enabled.Value) == "1" {
+			defaultID = strconv.FormatUint(uint64(pool.ID), 10)
+		}
+		return tx.Save(&models.Setting{Key: "default_proxy_pool_id", Value: defaultID}).Error
+	})
 }
 
 func backfillRegistrationMailboxIDs(db *gorm.DB) {

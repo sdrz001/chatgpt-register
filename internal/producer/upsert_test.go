@@ -2,7 +2,6 @@ package producer
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -59,26 +58,9 @@ func TestLoadConfigReadsCloakBrowserSettings(t *testing.T) {
 	}
 }
 
-func TestLoadConfigReadsAndRotatesProxyPool(t *testing.T) {
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.AutoMigrate(&models.Setting{}); err != nil {
-		t.Fatal(err)
-	}
-	settings := []models.Setting{
-		{Key: "proxy_enabled", Value: "1"},
-		{Key: "proxy_list", Value: "proxy-a\nproxy-b, proxy-c"},
-	}
-	if err := database.Create(&settings).Error; err != nil {
-		t.Fatal(err)
-	}
-	producer := &Producer{db: database}
-	config := producer.loadConfig()
-	if got := strings.Join(config.Proxies, ","); got != "proxy-a,proxy-b,proxy-c" {
-		t.Fatalf("proxies=%q", got)
-	}
+func TestNextProxyRotatesTaskProxySnapshot(t *testing.T) {
+	producer := &Producer{}
+	config := Config{Proxies: []string{"proxy-a", "proxy-b", "proxy-c"}}
 	got := []string{producer.nextProxy(config), producer.nextProxy(config), producer.nextProxy(config), producer.nextProxy(config)}
 	want := []string{"proxy-a", "proxy-b", "proxy-c", "proxy-a"}
 	if !reflect.DeepEqual(got, want) {

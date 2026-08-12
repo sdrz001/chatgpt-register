@@ -26,7 +26,7 @@ func produceTestHandler(t *testing.T, browser *browserboot.Manager) (*Handler, *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.AutoMigrate(&models.Setting{}, &models.Category{}, &models.Mailbox{}, &models.Registration{}); err != nil {
+	if err := database.AutoMigrate(&models.Setting{}, &models.ProxyPool{}, &models.Category{}, &models.Mailbox{}, &models.Registration{}); err != nil {
 		t.Fatal(err)
 	}
 	sqlDB, err := database.DB()
@@ -138,6 +138,51 @@ func TestValidateProduceScope(t *testing.T) {
 		if _, err := handler.validateProduceScope(input); err == nil {
 			t.Fatalf("%s accepted", name)
 		}
+	}
+}
+
+func TestApplyProduceProxyPoolUsesExplicitOrDefaultSnapshot(t *testing.T) {
+	handler, _ := produceTestHandler(t, nil)
+	pool := models.ProxyPool{Name: "日本池", Proxies: "proxy-a.test:8080\nproxy-a.test:8080\nproxy-b.test:8080"}
+	if err := handler.DB.Create(&pool).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.setDefaultProxyPoolID(handler.DB, pool.ID); err != nil {
+		t.Fatal(err)
+	}
+	var defaultScope producer.Scope
+	if err := handler.applyProduceProxyPool(&defaultScope, nil); err != nil {
+		t.Fatal(err)
+	}
+	if defaultScope.ProxyPoolID != pool.ID || defaultScope.ProxyPoolName != pool.Name || strings.Join(defaultScope.Proxies, ",") != "proxy-a.test:8080,proxy-b.test:8080" {
+		t.Fatalf("default scope=%+v", defaultScope)
+	}
+	pool.Proxies = "changed.test:8080"
+	if err := handler.DB.Save(&pool).Error; err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(defaultScope.Proxies, ",") != "proxy-a.test:8080,proxy-b.test:8080" {
+		t.Fatalf("scope was not a snapshot: %+v", defaultScope)
+	}
+	zero := uint(0)
+	direct := producer.Scope{}
+	if err := handler.applyProduceProxyPool(&direct, &zero); err != nil || direct.ProxyPoolID != 0 || len(direct.Proxies) != 0 {
+		t.Fatalf("direct=%+v error=%v", direct, err)
+	}
+}
+
+func TestApplyProduceProxyPoolRejectsMissingOrEmptyPool(t *testing.T) {
+	handler, _ := produceTestHandler(t, nil)
+	missing := uint(999)
+	if err := handler.applyProduceProxyPool(&producer.Scope{}, &missing); err == nil || !strings.Contains(err.Error(), "不存在") {
+		t.Fatalf("missing error=%v", err)
+	}
+	empty := models.ProxyPool{Name: "空池"}
+	if err := handler.DB.Create(&empty).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.applyProduceProxyPool(&producer.Scope{}, &empty.ID); err == nil || !strings.Contains(err.Error(), "没有可用代理") {
+		t.Fatalf("empty error=%v", err)
 	}
 }
 

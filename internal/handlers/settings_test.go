@@ -23,7 +23,7 @@ func settingsTestHandler(t *testing.T) (*Handler, *gin.Engine) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.AutoMigrate(&models.Setting{}, &models.Category{}, &models.Registration{}); err != nil {
+	if err := database.AutoMigrate(&models.Setting{}, &models.ProxyPool{}, &models.Category{}, &models.Registration{}); err != nil {
 		t.Fatal(err)
 	}
 	sqlDB, err := database.DB()
@@ -35,6 +35,12 @@ func settingsTestHandler(t *testing.T) (*Handler, *gin.Engine) {
 	r := gin.New()
 	r.GET("/settings", h.SettingsGet)
 	r.PUT("/settings", h.SettingsSave)
+	r.GET("/proxy-pools", h.ProxyPoolList)
+	r.GET("/proxy-pools/:id", h.ProxyPoolGet)
+	r.POST("/proxy-pools", h.ProxyPoolCreate)
+	r.PUT("/proxy-pools/:id", h.ProxyPoolUpdate)
+	r.DELETE("/proxy-pools/:id", h.ProxyPoolDelete)
+	r.PUT("/proxy-pools/default", h.ProxyPoolSetDefault)
 	return h, r
 }
 
@@ -76,6 +82,29 @@ func putSettings(r *gin.Engine, body string) *httptest.ResponseRecorder {
 	request.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(response, request)
 	return response
+}
+
+func TestSettingsHidesAndIgnoresLegacyProxyKeys(t *testing.T) {
+	handler, router := settingsTestHandler(t)
+	if err := handler.DB.Create(&[]models.Setting{
+		{Key: "proxy_enabled", Value: "1"},
+		{Key: "proxy_list", Value: "user:secret@proxy.test:8080"},
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/settings", nil))
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "proxy_list") || strings.Contains(response.Body.String(), "secret") {
+		t.Fatalf("legacy proxy leaked: status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = putSettings(router, `{"proxy_enabled":"0","proxy_list":"replacement.test:8080"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var setting models.Setting
+	if err := handler.DB.First(&setting, "key = ?", "proxy_list").Error; err != nil || setting.Value != "user:secret@proxy.test:8080" {
+		t.Fatalf("setting=%+v error=%v", setting, err)
+	}
 }
 
 func TestSettingsDefaultBrowserBackendIsRod(t *testing.T) {

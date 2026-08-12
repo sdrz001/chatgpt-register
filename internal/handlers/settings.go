@@ -19,6 +19,8 @@ var reservedSettingKeys = map[string]bool{
 	"jwt_secret":                 true,
 	"sms_api_key_configured":     true,
 	"sub2api_api_key_configured": true,
+	"proxy_enabled":              true,
+	"proxy_list":                 true,
 }
 
 var secretSettingKeys = map[string]string{
@@ -29,7 +31,6 @@ var secretSettingKeys = map[string]string{
 var allowedSettingKeys = map[string]bool{
 	"max_concurrency": true, "fission_count": true, "headless": true, "at_auto_check": true,
 	"browser_backend": true, "python_executable": true,
-	"proxy_enabled": true, "proxy_list": true,
 	"codex_auto_authorize": true, "sms_platform": true, "sms_api_key": true,
 	"sms_country": true, "sms_random_countries": true, "sms_max_price": true, "sms_timeout": true, "sms_phone_attempts": true,
 	"sub2api_auto_import": true, "sub2api_url": true, "sub2api_api_key": true,
@@ -121,7 +122,7 @@ func (h *Handler) SettingsSave(c *gin.Context) {
 }
 
 func validateSettings(values integrationcfg.Values, updates map[string]string) error {
-	for _, key := range []string{"headless", "proxy_enabled", "at_auto_check", "codex_auto_authorize", "sub2api_auto_import"} {
+	for _, key := range []string{"headless", "at_auto_check", "codex_auto_authorize", "sub2api_auto_import"} {
 		if value, changed := updates[key]; changed && value != "0" && value != "1" {
 			return fmt.Errorf("%s 必须是 0 或 1", key)
 		}

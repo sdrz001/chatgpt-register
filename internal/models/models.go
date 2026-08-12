@@ -2,6 +2,15 @@ package models
 
 import "time"
 
+type ProxyPool struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	Name       string    `gorm:"size:64;not null;uniqueIndex" json:"name"`
+	Proxies    string    `gorm:"type:text" json:"proxies,omitempty"`
+	ProxyCount int       `gorm:"-" json:"proxy_count"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
 type Category struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	Scope     string    `gorm:"size:16;not null;uniqueIndex:idx_category_scope_name" json:"scope"`

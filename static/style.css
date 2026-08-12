@@ -199,6 +199,7 @@ body {
 .toolbar .search { flex: 1; min-width: 220px; }
 .register-controls { display: flex; align-items: center; gap: 10px; }
 .register-controls .px-select { min-width: 112px; }
+#register-proxy-pool + .px-select-btn { min-width: 150px; max-width: 210px; }
 .register-controls .register-count { width: 72px; min-width: 72px; text-align: center; }
 .mailbox-picker { position: relative; }
 .mailbox-picker-btn { width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -756,7 +757,11 @@ select.px-input option { background: #fff; }
   .settings-form-grid { grid-template-columns: 1fr; }
   .settings-span-2 { grid-column: auto; }
 }
+.proxy-pool-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto; gap: 10px; margin-bottom: 18px; }
+.proxy-pool-toolbar .px-input, .proxy-pool-toolbar .px-select { width: 100%; }
+.proxy-pool-empty { padding: 22px; text-align: center; color: var(--text-3); background: #f8faff; border: 1px dashed #d7deea; border-radius: 10px; font-size: 13px; }
 .proxy-textarea { font-weight: 700; font-size: 12.5px; }
+@media (max-width: 640px) { .proxy-pool-toolbar { grid-template-columns: 1fr 1fr; } .proxy-pool-toolbar .px-select { grid-column: 1 / -1; } }
 .input-suffix { position: relative; }
 .input-suffix .suffix {
   position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
