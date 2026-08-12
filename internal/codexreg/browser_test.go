@@ -67,6 +67,21 @@ func TestRegistrationProfileValueSupportsAgeAndBirthdateTemplates(t *testing.T) 
 	}
 }
 
+func TestNormalizeProxySupportedShapes(t *testing.T) {
+	for input, want := range map[string]string{
+		"proxy.test:8080":                    "http://proxy.test:8080",
+		"user:pass@proxy.test:8080":          "http://user:pass@proxy.test:8080",
+		"user@name:p/a ss@proxy.test:8080":   "http://user%40name:p%2Fa%20ss@proxy.test:8080",
+		"proxy.test:8080:user:pass":          "http://user:pass@proxy.test:8080",
+		"http://user:pass@proxy.test:8080":   "http://user:pass@proxy.test:8080",
+		"socks5://user:pass@proxy.test:1080": "socks5://user:pass@proxy.test:1080",
+	} {
+		if got := normalizeProxy(input); got != want {
+			t.Fatalf("normalizeProxy(%q)=%q want %q", input, got, want)
+		}
+	}
+}
+
 func TestRegistrationBirthdateSegments(t *testing.T) {
 	values := registrationBirthdateSegments("1991-08-12")
 	for kind, want := range map[string]string{"year": "1991", "month": "08", "day": "12"} {

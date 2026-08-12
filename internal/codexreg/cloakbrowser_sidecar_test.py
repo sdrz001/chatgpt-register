@@ -92,6 +92,8 @@ class ProtocolTests(unittest.TestCase):
             "": "",
             "   ": "",
             "proxy.test:8080": "http://proxy.test:8080",
+            " user:pass@proxy.test:8080 ": "http://user:pass@proxy.test:8080",
+            "user@name:p/a ss@proxy.test:8080": "http://user%40name:p%2Fa%20ss@proxy.test:8080",
             " proxy.test:8080:user:pass ": "http://user:pass@proxy.test:8080",
             "proxy.test:8080:user@name:p/a ss": "http://user%40name:p%2Fa%20ss@proxy.test:8080",
             "http://proxy.test:8080": "http://proxy.test:8080",

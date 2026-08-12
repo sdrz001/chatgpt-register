@@ -94,8 +94,8 @@
             <label>代理列表</label>
             <span id="proxy-count" class="count-badge">识别到 0 个代理</span>
           </div>
-          <span class="field-hint">每行一个，支持 http(s)://user:pass@host:port、socks5://host:port、host:port:user:pass</span>
-          <textarea id="set-proxy-list" class="px-input proxy-textarea" rows="5" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" oninput="updateProxyCount()" placeholder="http://user:pass@1.2.3.4:8080&#10;socks5://1.2.3.4:1080&#10;1.2.3.4:8080:user:pass"></textarea>
+          <span class="field-hint">每行一个，支持 user:pass@host:port、host:port:user:pass、host:port，以及带 http(s):// 或 socks5:// 前缀的格式</span>
+          <textarea id="set-proxy-list" class="px-input proxy-textarea" rows="5" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" oninput="updateProxyCount()" placeholder="user:pass@1.2.3.4:8080&#10;1.2.3.4:8080:user:pass&#10;http://user:pass@1.2.3.4:8080"></textarea>
         </div>
         <div id="proxy-test-result" class="proxy-result" style="display:none"></div>
         <div class="settings-foot">

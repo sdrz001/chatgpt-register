@@ -262,7 +262,7 @@ func sidecarTestInput(t *testing.T, mode string) Input {
 		Password:         "secret-password",
 		FullName:         "Sidecar User",
 		Age:              "25",
-		Proxy:            "http://proxy-user:proxy-password@127.0.0.1:8080",
+		Proxy:            "proxy-user:proxy-password@127.0.0.1:8080",
 		Headless:         true,
 		Backend:          BackendCloakBrowser,
 		PythonExecutable: os.Args[0],
@@ -296,7 +296,7 @@ func runSidecarHelper(mode string) error {
 	if start.Version != sidecarProtocolVersion || start.Type != "start" || start.RequestID == "" {
 		return fmt.Errorf("invalid start envelope: %+v", start)
 	}
-	if start.Payload.Email != "sensitive@example.test" || start.Payload.Password != "secret-password" || start.Payload.FullName != "Sidecar User" || start.Payload.Age != "25" || !start.Payload.Headless {
+	if start.Payload.Email != "sensitive@example.test" || start.Payload.Password != "secret-password" || start.Payload.FullName != "Sidecar User" || start.Payload.Age != "25" || start.Payload.Proxy != "http://proxy-user:proxy-password@127.0.0.1:8080" || !start.Payload.Headless {
 		return fmt.Errorf("invalid start payload")
 	}
 	encoder := json.NewEncoder(os.Stdout)

@@ -275,7 +275,7 @@ func registerSidecar(ctx context.Context, in Input) (string, error) {
 	go process.watchCancellation(ctx, requestID)
 	start := sidecarStartMessage{
 		Version: sidecarProtocolVersion, Type: "start", RequestID: requestID,
-		Payload: sidecarStartPayload{Email: in.Email, Password: in.Password, FullName: in.FullName, Age: in.Age, Proxy: in.Proxy, Headless: in.Headless},
+		Payload: sidecarStartPayload{Email: in.Email, Password: in.Password, FullName: in.FullName, Age: in.Age, Proxy: normalizeProxy(in.Proxy), Headless: in.Headless},
 	}
 	if err := process.writer.send(start); err != nil {
 		_ = process.wait(true)

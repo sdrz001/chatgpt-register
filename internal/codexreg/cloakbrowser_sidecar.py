@@ -142,6 +142,18 @@ def normalize_proxy(value: str) -> str:
             raise invalid_proxy()
         validate_proxy_url(raw)
         return raw
+    if "@" in raw:
+        credentials, host_port = raw.rsplit("@", 1)
+        if ":" in credentials and ":" in host_port:
+            username, password = credentials.split(":", 1)
+            host, port = host_port.rsplit(":", 1)
+            if username and password:
+                try:
+                    validate_proxy_host_port(host, port)
+                except SidecarError:
+                    pass
+                else:
+                    return f"http://{quote(username, safe='')}:{quote(password, safe='')}@{host}:{port}"
     parts = raw.split(":")
     if len(parts) == 2:
         validate_proxy_host_port(parts[0], parts[1])

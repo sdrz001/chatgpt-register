@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,15 +23,29 @@ func normalizeProxy(raw string) string {
 	if strings.Contains(raw, "://") {
 		return raw
 	}
+	if separator := strings.LastIndex(raw, "@"); separator > 0 {
+		credentials, hostPort := raw[:separator], raw[separator+1:]
+		credentialSeparator := strings.Index(credentials, ":")
+		hostSeparator := strings.LastIndex(hostPort, ":")
+		if credentialSeparator > 0 && credentialSeparator < len(credentials)-1 && hostSeparator > 0 && validProxyPort(hostPort[hostSeparator+1:]) {
+			username, password := credentials[:credentialSeparator], credentials[credentialSeparator+1:]
+			return "http://" + url.UserPassword(username, password).String() + "@" + hostPort
+		}
+	}
 	parts := strings.Split(raw, ":")
 	switch len(parts) {
 	case 2: // host:port
 		return "http://" + parts[0] + ":" + parts[1]
 	case 4: // host:port:user:pass
-		return "http://" + url.QueryEscape(parts[2]) + ":" + url.QueryEscape(parts[3]) + "@" + parts[0] + ":" + parts[1]
+		return "http://" + url.UserPassword(parts[2], parts[3]).String() + "@" + parts[0] + ":" + parts[1]
 	default:
 		return "http://" + raw
 	}
+}
+
+func validProxyPort(value string) bool {
+	port, err := strconv.Atoi(value)
+	return err == nil && port >= 1 && port <= 65535
 }
 
 // parseProxy 解析代理串，返回 Chrome --proxy-server 用的 scheme://host:port（不含账号密码）
