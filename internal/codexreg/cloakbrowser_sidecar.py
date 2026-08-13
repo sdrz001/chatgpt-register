@@ -123,6 +123,7 @@ def validate_start(raw: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(proxy, str) or not isinstance(payload.get("headless"), bool):
         raise SidecarError("invalid_payload", "payload proxy/headless has invalid type")
     result.update(proxy=normalize_proxy(proxy), headless=payload["headless"])
+    result.update(locale=optional_text(payload, "locale"), timezone=optional_text(payload, "timezone"))
     return result
 
 
@@ -130,6 +131,15 @@ def required_text(payload: Mapping[str, Any], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
         raise SidecarError("invalid_payload", f"payload.{key} is required")
+    return value.strip()
+
+
+def optional_text(payload: Mapping[str, Any], key: str) -> str:
+    value = payload.get(key, "")
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise SidecarError("invalid_payload", f"payload.{key} must be a string")
     return value.strip()
 
 
@@ -267,6 +277,10 @@ async def launch_context(registration: Registration, profile: Path) -> Any:
     options: dict[str, Any] = {"headless": registration.payload["headless"], "humanize": True}
     if registration.payload["proxy"]:
         options.update(proxy=registration.payload["proxy"], geoip=True)
+    if registration.payload.get("locale"):
+        options["locale"] = registration.payload["locale"]
+    if registration.payload.get("timezone"):
+        options["timezone"] = registration.payload["timezone"]
     launch_task = asyncio.create_task(load_launcher()(str(profile), **options))
     try:
         registration.context = await asyncio.shield(launch_task)

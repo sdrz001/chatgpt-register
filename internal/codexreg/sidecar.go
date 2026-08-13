@@ -53,6 +53,8 @@ type sidecarStartPayload struct {
 	Age      string `json:"age"`
 	Proxy    string `json:"proxy"`
 	Headless bool   `json:"headless"`
+	Locale   string `json:"locale"`
+	Timezone string `json:"timezone"`
 }
 
 type sidecarMessage struct {
@@ -273,9 +275,10 @@ func registerSidecar(ctx context.Context, in Input) (string, error) {
 		return "", err
 	}
 	go process.watchCancellation(ctx, requestID)
+	locale, timezone := sidecarLocaleTimezone(in)
 	start := sidecarStartMessage{
 		Version: sidecarProtocolVersion, Type: "start", RequestID: requestID,
-		Payload: sidecarStartPayload{Email: in.Email, Password: in.Password, FullName: in.FullName, Age: in.Age, Proxy: normalizeProxy(in.Proxy), Headless: in.Headless},
+		Payload: sidecarStartPayload{Email: in.Email, Password: in.Password, FullName: in.FullName, Age: in.Age, Proxy: normalizeProxy(in.Proxy), Headless: in.Headless, Locale: locale, Timezone: timezone},
 	}
 	if err := process.writer.send(start); err != nil {
 		_ = process.wait(true)
@@ -300,6 +303,20 @@ func registerSidecar(ctx context.Context, in Input) (string, error) {
 		return "", sidecarFailure(fmt.Errorf("sidecar 进程异常退出: %w", waitErr), process.stderr.buf.String(), in, session.code, session.token)
 	}
 	return session.token, nil
+}
+
+// sidecarLocaleTimezone 经代理出口查询地理位置，推导与出口 IP 一致的 locale 与时区。
+// CloakBrowser 接受 BCP-47 形式的 locale（pt-BR），而 localeForCountry 返回 ICU 形式（pt_BR），故此处转换。
+// 查询失败时返回空串，由 sidecar 交给 CloakBrowser 自行按 geoip 推导。
+func sidecarLocaleTimezone(in Input) (locale, timezone string) {
+	geo := lookupGeoIPViaRequest(in)
+	if geo == nil {
+		return "", ""
+	}
+	icuLocale, acceptLang := localeForCountry(geo.CountryCode)
+	locale = strings.ReplaceAll(icuLocale, "_", "-")
+	in.logf("✅ 已对齐浏览器语言/时区: locale=%s lang=%s tz=%s", locale, acceptLang, geo.Timezone)
+	return locale, geo.Timezone
 }
 
 func validateSidecarMessage(message sidecarMessage, requestID string) error {

@@ -220,6 +220,20 @@ func TestSidecarNormalizesInvalidUTF8(t *testing.T) {
 	}
 }
 
+func TestLocaleForCountryConvertsToBCP47(t *testing.T) {
+	for country, want := range map[string]string{
+		"BR": "pt-BR",
+		"US": "en-US",
+		"JP": "ja-JP",
+		"ZZ": "en-US",
+	} {
+		icu, _ := localeForCountry(country)
+		if got := strings.ReplaceAll(icu, "_", "-"); got != want {
+			t.Fatalf("country %s: got %q want %q", country, got, want)
+		}
+	}
+}
+
 func TestSidecarOversizedScreenshot(t *testing.T) {
 	encoded := base64.StdEncoding.EncodeToString(make([]byte, sidecarScreenshotLimit+1))
 	_, err := decodeSidecarScreenshot(encoded)

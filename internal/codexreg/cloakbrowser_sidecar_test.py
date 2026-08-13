@@ -159,6 +159,40 @@ class LaunchTests(unittest.IsolatedAsyncioTestCase):
             proxy="http://proxy.example.test:8080", geoip=True
         )
 
+    async def test_launch_context_forwards_locale_and_timezone(self):
+        payload = {
+            "email": "person@example.test",
+            "password": "secret",
+            "proxy": "http://proxy.example.test:8080",
+            "headless": True,
+            "locale": "pt-BR",
+            "timezone": "America/Sao_Paulo",
+        }
+        registration = sidecar.Registration(sidecar.JsonWriter(io.StringIO()), "request", payload)
+        launcher = mock.AsyncMock(return_value=object())
+        with mock.patch.object(sidecar, "load_launcher", return_value=launcher):
+            await sidecar.launch_context(registration, Path("profile"))
+        launcher.assert_awaited_once_with(
+            "profile", headless=True, humanize=True,
+            proxy="http://proxy.example.test:8080", geoip=True,
+            locale="pt-BR", timezone="America/Sao_Paulo"
+        )
+
+    async def test_launch_context_omits_blank_locale_and_timezone(self):
+        payload = {
+            "email": "person@example.test",
+            "password": "secret",
+            "proxy": "",
+            "headless": True,
+            "locale": "",
+            "timezone": "",
+        }
+        registration = sidecar.Registration(sidecar.JsonWriter(io.StringIO()), "request", payload)
+        launcher = mock.AsyncMock(return_value=object())
+        with mock.patch.object(sidecar, "load_launcher", return_value=launcher):
+            await sidecar.launch_context(registration, Path("profile"))
+        launcher.assert_awaited_once_with("profile", headless=True, humanize=True)
+
 
 class ConversionTests(unittest.TestCase):
     def test_birthdate_accepts_iso_and_converts_age(self):
@@ -170,6 +204,55 @@ class ConversionTests(unittest.TestCase):
     def test_birthdate_handles_leap_day(self):
         self.assertEqual(sidecar.birthdate_from_age("20", date(2024, 2, 29)), "2004-02-29")
         self.assertEqual(sidecar.birthdate_from_age("19", date(2024, 2, 29)), "2005-02-28")
+
+
+class BrazilianPortugueseTests(unittest.TestCase):
+    """巴西 pt-BR 页面的填表回归：语言切换后按钮与文案仍需被正确识别。"""
+
+    def setUp(self):
+        self.flow = sys.modules[sidecar.RegistrationFlow.__module__]
+
+    def test_submit_buttons_are_clickable(self):
+        for text in (
+            "Continuar", "Próximo", "Proximo", "Avançar", "Verificar",
+            "Enviar", "Entrar", "Criar conta", "Concluir criação da conta",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(self.flow.SUBMIT_ACTION_RE.match(text))
+                self.assertIsNone(self.flow.EXTERNAL_LOGIN_RE.search(text))
+
+    def test_third_party_buttons_are_excluded(self):
+        for text in ("Continuar com o Google", "Continuar com a Apple", "Continuar com um telefone"):
+            with self.subTest(text=text):
+                self.assertIsNotNone(self.flow.EXTERNAL_LOGIN_RE.search(text))
+
+    def test_resend_and_retry_actions(self):
+        self.assertIsNotNone(self.flow.RESEND_RE.search("Reenviar código"))
+        self.assertIsNotNone(self.flow.RESEND_RE.search("Enviar novamente"))
+        self.assertIsNotNone(self.flow.RETRY_RE.search("Tentar novamente"))
+
+    def test_page_texts_are_classified(self):
+        self.assertEqual(sidecar.classify_page(sidecar.Signals(body="Verifique se você é humano")), "challenge")
+        self.assertEqual(sidecar.classify_page(sidecar.Signals(body="Verificação de segurança")), "challenge")
+        self.assertEqual(sidecar.classify_page(sidecar.Signals(body="Você não tem uma conta")), "disabled")
+        self.assertEqual(sidecar.classify_page(sidecar.Signals(body="Esta conta foi desativada")), "disabled")
+        rejected = sidecar.Signals(code=True, body="Código inválido")
+        self.assertEqual(sidecar.classify_page(rejected), "code_rejected")
+        expired = sidecar.Signals(code=True, body="Código expirado")
+        self.assertEqual(sidecar.classify_page(expired), "code_rejected")
+
+    def test_birthdate_segments_match_by_kind_not_order(self):
+        cases = {"dia": "day", "mês": "month", "mes": "month", "ano": "year", "aaaa": "year"}
+        for metadata, want in cases.items():
+            with self.subTest(metadata=metadata):
+                self.assertEqual(asyncio.run(self._segment_kind(metadata)), want)
+
+    async def _segment_kind(self, aria_label):
+        segment = mock.AsyncMock()
+        segment.get_attribute = mock.AsyncMock(
+            side_effect=lambda name: {"data-type": None, "aria-label": aria_label}.get(name)
+        )
+        return await self.flow.date_segment_kind(segment)
 
 
 class ClassificationTests(unittest.TestCase):

@@ -12,31 +12,41 @@ from urllib.parse import urlsplit
 EMAIL = "#email,input[name='email'],input[type='email'],input[autocomplete='email']"
 PASSWORD = "input[type='password'],input[name='password'],input[autocomplete='new-password'],input[autocomplete='current-password']"
 CODE = "input[name='code'],input[autocomplete='one-time-code'],input[inputmode='numeric'][maxlength='6']"
-NAME = "input[name='name'],input[name='fullName'],input[name='full_name'],input[id='name'],input[id='fullName'],input[id='full-name'],input[autocomplete='name'],input[placeholder='Full name'],input[placeholder='Name'],input[placeholder='全名'],input[placeholder='姓名'],input[aria-label='Full name'],input[aria-label='Name'],input[aria-label='全名'],input[aria-label='姓名']"
-PROFILE = "input[name='age'],input[name='birthdate'],input[name='birthday'],input[name='date_of_birth'],input[name='dob'],input[id='age'],input[id*='birth'],input[autocomplete='bday'],input[type='date'],input[placeholder='Age'],input[placeholder='年龄'],input[placeholder='生日'],input[placeholder='出生日期'],input[placeholder='出生年月日'],input[aria-label='Age'],input[aria-label='年龄'],input[aria-label='生日'],input[aria-label='出生日期'],input[aria-label='出生年月日'],input[placeholder='YYYY/MM/DD'],input[placeholder='YYYY-MM-DD'],input[placeholder='MM/DD/YYYY'],input[aria-label='YYYY/MM/DD'],input[aria-label='YYYY-MM-DD'],input[aria-label='MM/DD/YYYY']"
+NAME = "input[name='name'],input[name='fullName'],input[name='full_name'],input[id='name'],input[id='fullName'],input[id='full-name'],input[autocomplete='name'],input[placeholder='Full name'],input[placeholder='Name'],input[placeholder='Nome completo'],input[placeholder='Nome'],input[placeholder='全名'],input[placeholder='姓名'],input[aria-label='Full name'],input[aria-label='Name'],input[aria-label='Nome completo'],input[aria-label='Nome'],input[aria-label='全名'],input[aria-label='姓名']"
+PROFILE = "input[name='age'],input[name='birthdate'],input[name='birthday'],input[name='date_of_birth'],input[name='dob'],input[id='age'],input[id*='birth'],input[id*='nascimento'],input[autocomplete='bday'],input[type='date'],input[placeholder='Age'],input[placeholder='Idade'],input[placeholder='Data de nascimento'],input[aria-label='Idade'],input[aria-label='Data de nascimento'],input[placeholder='DD/MM/AAAA'],input[aria-label='DD/MM/AAAA'],input[placeholder='年龄'],input[placeholder='生日'],input[placeholder='出生日期'],input[placeholder='出生年月日'],input[aria-label='Age'],input[aria-label='年龄'],input[aria-label='生日'],input[aria-label='出生日期'],input[aria-label='出生年月日'],input[placeholder='YYYY/MM/DD'],input[placeholder='YYYY-MM-DD'],input[placeholder='MM/DD/YYYY'],input[aria-label='YYYY/MM/DD'],input[aria-label='YYYY-MM-DD'],input[aria-label='MM/DD/YYYY']"
 DATE_GROUPS = "[role='group']"
 DATE_SEGMENTS = ":scope > [role='spinbutton'][data-type],:scope > [role='spinbutton'][aria-label],:scope > [contenteditable='true'][data-type]"
 READY = "textarea[name='prompt-textarea'],#prompt-textarea,[data-testid='composer'],[data-testid='composer-input'],[contenteditable='true'][data-lexical-editor='true']"
 SUBMIT = "button[type='submit'],input[type='submit'],form button:not([type])"
 ACTIONS = "button,a,[role='button']"
 CHALLENGE = "iframe[src*='challenge'],iframe[src*='captcha'],iframe[src*='turnstile'],#challenge-running,[data-testid*='captcha'],[class*='captcha']"
-RETRY_RE = re.compile(r"try again|retry|重试|再试一次|再試行|もう一度", re.I)
-RESEND_RE = re.compile(r"resend code|send again|request another code|resend email|重新发送|重发验证码|再次发送|コードを再送|再送信", re.I)
-EXTERNAL_LOGIN_RE = re.compile(r"google|apple|microsoft|phone number|电话号码|電話番号|手机号|携帯電話", re.I)
-SUBMIT_ACTION_RE = re.compile(r"^\s*(continue|next|verify|submit|sign in|log in|create account|complete account creation|继续|下一步|验证|提交|登录|创建账户|创建帐号|创建帐户|完成账户创建|完成帐号创建|完成帐户创建|继续する|次へ|確認|送信|ログイン|アカウント作成|계속|다음|확인|제출|로그인)\s*$", re.I)
+RETRY_RE = re.compile(r"try again|retry|tentar novamente|重试|再试一次|再試行|もう一度", re.I)
+RESEND_RE = re.compile(r"resend code|send again|request another code|resend email|reenviar c[óo]digo|reenviar e-?mail|enviar novamente|重新发送|重发验证码|再次发送|コードを再送|再送信", re.I)
+EXTERNAL_LOGIN_RE = re.compile(r"google|apple|microsoft|phone number|telefone|电话号码|電話番号|手机号|携帯電話", re.I)
+SUBMIT_ACTION_RE = re.compile(r"^\s*(continue|next|verify|submit|sign in|log in|create account|complete account creation|continuar|pr[óo]ximo|avan[çc]ar|verificar|enviar|entrar|criar conta|concluir cria[çc][ãa]o da conta|继续|下一步|验证|提交|登录|创建账户|创建帐号|创建帐户|完成账户创建|完成帐号创建|完成帐户创建|继续する|次へ|確認|送信|ログイン|アカウント作成|계속|다음|확인|제출|로그인)\s*$", re.I)
 CHALLENGE_TEXT = (
     "verify you are human", "security check", "unusual activity", "captcha",
     "automated access", "verification successful", "waiting for chatgpt.com to respond",
+    "verifique se você é humano", "verifique se voce e humano", "verificação de segurança",
+    "verificacao de seguranca", "atividade incomum", "acesso automatizado",
+    "verificação bem-sucedida", "verificacao bem-sucedida",
+    "aguardando resposta de chatgpt.com", "confirme que você é humano",
     "验证您是人类", "安全验证", "自动化访问", "可疑活动", "验证成功", "正在等待 chatgpt.com 响应",
     "驗證成功", "正在等待 chatgpt.com 回應", "人間であることを確認", "セキュリティチェック",
     "ロボットではない", "不審なアクティビティ",
 )
 DISABLED_TEXT = (
     "you do not have an account", "deleted or deactivated", "account has been deactivated",
+    "você não tem uma conta", "voce nao tem uma conta", "não tem uma conta",
+    "excluída ou desativada", "excluida ou desativada", "conta foi desativada",
+    "conta foi excluída", "conta foi excluida",
     "账号不存在", "账号已被删除", "账号已停用", "アカウントが存在しません", "削除または無効",
 )
 REJECTED_TEXT = (
     "invalid code", "incorrect code", "wrong code", "code expired", "验证码错误",
+    "código inválido", "codigo invalido", "código incorreto", "codigo incorreto",
+    "código expirado", "codigo expirado", "código expirou", "codigo expirou",
+    "código de verificação inválido", "codigo de verificacao invalido",
     "验证码无效", "验证码已过期", "验证码不正确", "コードが正しくありません",
     "コードが無効", "コードの有効期限", "認証コードが正しくありません",
 )
@@ -56,14 +66,16 @@ INSPECT_SCRIPT = r"""() => {
     const email = first("#email,input[name='email'],input[type='email'],input[autocomplete='email']");
     const password = first("input[type='password'],input[name='password'],input[autocomplete='new-password'],input[autocomplete='current-password']");
     const code = first("input[name='code'],input[autocomplete='one-time-code'],input[inputmode='numeric'][maxlength='6']");
-    const name = first("input[name='name'],input[name='fullName'],input[name='full_name'],input[id='name'],input[id='fullName'],input[id='full-name'],input[autocomplete='name'],input[placeholder='Full name'],input[placeholder='Name'],input[placeholder='全名'],input[placeholder='姓名'],input[aria-label='Full name'],input[aria-label='Name'],input[aria-label='全名'],input[aria-label='姓名']");
-    const profile = first("input[name='age'],input[name='birthdate'],input[name='birthday'],input[name='date_of_birth'],input[name='dob'],input[id='age'],input[id*='birth'],input[autocomplete='bday'],input[type='date'],input[placeholder='Age'],input[placeholder='年龄'],input[placeholder='生日'],input[placeholder='出生日期'],input[placeholder='出生年月日'],input[aria-label='Age'],input[aria-label='年龄'],input[aria-label='生日'],input[aria-label='出生日期'],input[aria-label='出生年月日'],input[placeholder='YYYY/MM/DD'],input[placeholder='YYYY-MM-DD'],input[placeholder='MM/DD/YYYY'],input[aria-label='YYYY/MM/DD'],input[aria-label='YYYY-MM-DD'],input[aria-label='MM/DD/YYYY']");
+    const name = first("input[name='name'],input[name='fullName'],input[name='full_name'],input[id='name'],input[id='fullName'],input[id='full-name'],input[autocomplete='name'],input[placeholder='Full name'],input[placeholder='Name'],input[placeholder='Nome completo'],input[placeholder='Nome'],input[placeholder='全名'],input[placeholder='姓名'],input[aria-label='Full name'],input[aria-label='Name'],input[aria-label='Nome completo'],input[aria-label='Nome'],input[aria-label='全名'],input[aria-label='姓名']");
+    const profile = first("input[name='age'],input[name='birthdate'],input[name='birthday'],input[name='date_of_birth'],input[name='dob'],input[id='age'],input[id*='birth'],input[id*='nascimento'],input[autocomplete='bday'],input[type='date'],input[placeholder='Age'],input[placeholder='Idade'],input[placeholder='Data de nascimento'],input[aria-label='Idade'],input[aria-label='Data de nascimento'],input[placeholder='DD/MM/AAAA'],input[aria-label='DD/MM/AAAA'],input[placeholder='年龄'],input[placeholder='生日'],input[placeholder='出生日期'],input[placeholder='出生年月日'],input[aria-label='Age'],input[aria-label='年龄'],input[aria-label='生日'],input[aria-label='出生日期'],input[aria-label='出生年月日'],input[placeholder='YYYY/MM/DD'],input[placeholder='YYYY-MM-DD'],input[placeholder='MM/DD/YYYY'],input[aria-label='YYYY/MM/DD'],input[aria-label='YYYY-MM-DD'],input[aria-label='MM/DD/YYYY']");
     const dateGroups = Array.from(document.querySelectorAll("[role='group']")).filter(visible);
     const segmentKind = element => {
         const metadata = [element.dataset.type, element.getAttribute('aria-label')].filter(Boolean).join(' ').toLowerCase();
-        if (/year|yyyy|年|年份|年号|年號/.test(metadata)) return 'year';
-        if (/month|mm|月|月份/.test(metadata)) return 'month';
-        if (/day|dd|日|日期/.test(metadata)) return 'day';
+        if (/year|yyyy|ano|aaaa|年|年份|年号|年號/.test(metadata)) return 'year';
+        if (/month|mm|mês|mes/.test(metadata)) return 'month';
+        if (/day|dd|dia/.test(metadata)) return 'day';
+        if (/月|月份/.test(metadata)) return 'month';
+        if (/日|日期/.test(metadata)) return 'day';
         const maximum = Number(element.getAttribute('aria-valuemax') || 0);
         if (maximum > 31) return 'year';
         if (maximum === 12) return 'month';
@@ -97,15 +109,15 @@ INSPECT_SCRIPT = r"""() => {
         emailValue: email ? (email.value || '') : '',
         password: !!password,
         code: !!code,
-        codeInvalid: !!code && (code.getAttribute('aria-invalid') === 'true' || /invalid|incorrect|wrong|expired|错误|无效|过期|正しくありません|無効|有効期限/i.test(alerts)),
+        codeInvalid: !!code && (code.getAttribute('aria-invalid') === 'true' || /invalid|incorrect|wrong|expired|inv[áa]lido|incorreto|expirou|expirado|错误|无效|过期|正しくありません|無効|有効期限/i.test(alerts)),
         name: !!name,
         nameValue: name ? (name.value || '') : '',
-        profileField: profile ? (profile.getAttribute('name') || (profile.type === 'date' || /birth|生日|出生日期|出生年月日/i.test([profile.id, profile.placeholder, profile.getAttribute('aria-label'), profile.autocomplete].filter(Boolean).join(' ')) ? 'birthdate' : 'age')) : (segmentedBirthdate ? 'birthdate_segments' : ''),
+        profileField: profile ? (profile.getAttribute('name') || (profile.type === 'date' || /birth|bday|nascimento|生日|出生日期|出生年月日/i.test([profile.id, profile.placeholder, profile.getAttribute('aria-label'), profile.autocomplete].filter(Boolean).join(' ')) ? 'birthdate' : 'age')) : (segmentedBirthdate ? 'birthdate_segments' : ''),
         profileValue: profile ? (profile.value || '') : segmentedValue,
-        profileInvalid: profile ? (profile.getAttribute('aria-invalid') === 'true' || /invalid|incorrect|required|date of birth|birth date|birthday|错误|无效|必填|出生日期|生年月日|正しく|無効/i.test(alerts)) : dateSegments.some(segment => segment.getAttribute('aria-invalid') === 'true'),
+        profileInvalid: profile ? (profile.getAttribute('aria-invalid') === 'true' || /invalid|incorrect|required|date of birth|birth date|birthday|inv[áa]lido|incorreto|obrigat[óo]rio|data de nascimento|错误|无效|必填|出生日期|生年月日|正しく|無効/i.test(alerts)) : dateSegments.some(segment => segment.getAttribute('aria-invalid') === 'true'),
         profileKey: profile ? [performance.timeOrigin, profile.name, profile.id, profile.type, profile.placeholder, profile.getAttribute('aria-label')].filter(Boolean).join('|') : (segmentedBirthdate ? `${performance.timeOrigin}|birthdate_segments` : ''),
         ready: !!first("textarea[name='prompt-textarea'],#prompt-textarea,[data-testid='composer'],[data-testid='composer-input'],[contenteditable='true'][data-lexical-editor='true']"),
-        retry: /try again|retry|重试|再试一次|再試行|もう一度/i.test(actions),
+        retry: /try again|retry|tentar novamente|重试|再试一次|再試行|もう一度/i.test(actions),
         actions: actions.slice(0, 500),
         challenge: !!first("iframe[src*='challenge'],iframe[src*='captcha'],iframe[src*='turnstile'],#challenge-running,[data-testid*='captcha'],[class*='captcha']")
     };
@@ -745,11 +757,15 @@ async def date_segment_kind(segment: Any) -> str:
     segment_type = str((await segment.get_attribute("data-type")) or "").lower()
     aria_label = str((await segment.get_attribute("aria-label")) or "").lower()
     metadata = f"{segment_type} {aria_label}"
-    if re.search(r"year|yyyy|年|年份|年号|年號", metadata):
+    if re.search(r"year|yyyy|ano|aaaa|年|年份|年号|年號", metadata):
         return "year"
-    if re.search(r"month|mm|月|月份", metadata):
+    if re.search(r"month|mm|mês|mes", metadata):
         return "month"
-    if re.search(r"day|dd|日|日期", metadata):
+    if re.search(r"day|dd|dia", metadata):
+        return "day"
+    if re.search(r"月|月份", metadata):
+        return "month"
+    if re.search(r"日|日期", metadata):
         return "day"
     maximum = str((await segment.get_attribute("aria-valuemax")) or "")
     if maximum.isdigit() and int(maximum) > 31:
