@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"chatgpt-register/internal/categorysync"
+	"chatgpt-register/internal/codexreg"
 	"chatgpt-register/internal/emailalias"
 	"chatgpt-register/internal/models"
 
@@ -26,6 +27,7 @@ func Init(path string) (*gorm.DB, error) {
 	reclaimOrphanIntegrations(db)
 	reclaimOrphanATChecks(db)
 	backfillRegistrationMailboxIDs(db)
+	backfillRegisterLocations(db)
 	categorysync.BackfillRegistrations(db)
 	if err := migrateLegacyProxyPool(db); err != nil {
 		return nil, err
@@ -95,6 +97,35 @@ func migrateLegacyProxyPool(db *gorm.DB) error {
 		}
 		return tx.Save(&models.Setting{Key: "default_proxy_pool_id", Value: defaultID}).Error
 	})
+}
+
+func backfillRegisterLocations(db *gorm.DB) {
+	var regs []models.Registration
+	if err := db.Select("id", "log", "register_country", "register_ip", "register_city").
+		Where("register_country = ? OR register_country IS NULL", "").
+		Where("log <> ? AND log IS NOT NULL", "").
+		Find(&regs).Error; err != nil {
+		return
+	}
+	for _, reg := range regs {
+		loc := codexreg.ParseRegisterLocation(reg.Log)
+		if loc.Country == "" && loc.IP == "" {
+			continue
+		}
+		updates := map[string]any{}
+		if loc.Country != "" {
+			updates["register_country"] = loc.Country
+		}
+		if loc.IP != "" && reg.RegisterIP == "" {
+			updates["register_ip"] = loc.IP
+		}
+		if loc.City != "" && reg.RegisterCity == "" {
+			updates["register_city"] = loc.City
+		}
+		if len(updates) > 0 {
+			db.Model(&models.Registration{}).Where("id = ?", reg.ID).Updates(updates)
+		}
+	}
 }
 
 func backfillRegistrationMailboxIDs(db *gorm.DB) {

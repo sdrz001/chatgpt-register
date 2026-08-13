@@ -411,6 +411,10 @@ func mailAccount(mailbox models.Mailbox) mailfetch.Account {
 func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox, email string, isMother bool) error {
 	password := codexreg.GenPassword(16)
 	accountProxy := p.nextProxy(cfg)
+	exit := codexreg.ExitLocation{}
+	if cfg.BrowserBackend == codexreg.BackendCloakBrowser {
+		exit = p.detectRegisterLocation(accountProxy)
+	}
 	categoryID, err := categorysync.AccountCategoryID(p.db, mb.CategoryID)
 	if err != nil {
 		return fmt.Errorf("同步邮箱分类: %w", err)
@@ -421,6 +425,7 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 	}
 	p.upsert(models.Registration{
 		Email: email, MailboxID: mb.ID, Password: password, Proxy: accountProxy,
+		RegisterCountry: exit.Country, RegisterIP: exit.IP, RegisterCity: exit.City,
 		Status: "registering", IsMother: isMother, Note: note, CategoryID: categoryID,
 	})
 
@@ -459,6 +464,9 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 		}
 	}
 	appendLog("浏览器后端: " + cfg.BrowserBackend)
+	if line := codexreg.FormatExitLocation(exit); line != "" {
+		appendLog(line)
+	}
 	in := codexreg.Input{
 		Email:            email,
 		Password:         password,
@@ -501,8 +509,10 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 	authBytes, _ := json.MarshalIndent(res.AuthJSON, "", "  ")
 	now := time.Now()
 	_, expiresAt, _ := codexreg.AccessTokenDetails(res.AccessToken)
+	exit = codexreg.MergeExitLocation(exit, codexreg.ParseRegisterLocation(logBuf.String()))
 	p.upsert(models.Registration{
 		Email: email, MailboxID: mb.ID, Password: password, Proxy: accountProxy,
+		RegisterCountry: exit.Country, RegisterIP: exit.IP, RegisterCity: exit.City,
 		Status: "registered", IsMother: isMother, Note: note, CategoryID: categoryID,
 		AuthData: string(authBytes), AccountID: res.AccountID,
 		UserID: res.UserID, PlanType: res.PlanType, ATStatus: "valid", TrialStatus: "unchecked",
@@ -723,6 +733,10 @@ func (p *Producer) loadConfig() Config {
 	return cfg
 }
 
+func (p *Producer) detectRegisterLocation(proxy string) codexreg.ExitLocation {
+	return codexreg.DetectProxyExit(proxy)
+}
+
 // nextProxy 从代理池按轮转取一个；池为空返回空串（直连）。
 func (p *Producer) nextProxy(cfg Config) string {
 	if len(cfg.Proxies) == 0 {
@@ -742,6 +756,7 @@ func (p *Producer) upsert(reg models.Registration) {
 			"password": reg.Password, "status": reg.Status,
 			"is_mother": reg.IsMother, "note": reg.Note, "mailbox_id": reg.MailboxID,
 			"proxy": reg.Proxy, "category_id": reg.CategoryID,
+			"register_country": reg.RegisterCountry, "register_ip": reg.RegisterIP, "register_city": reg.RegisterCity,
 		}
 		if reg.Status == "registering" {
 			updates["shot"] = nil

@@ -499,6 +499,13 @@ select.px-input option { background: #fff; }
 .plan-enterprise, .plan-edu { color: #9a3412; background: rgba(234, 88, 12, .12); }
 .plan-go { color: #047857; background: rgba(5, 150, 105, .12); }
 .category-chip { color: var(--primary); background: var(--primary-soft); }
+.country-chip {
+  display: inline-flex; align-items: baseline; gap: 4px;
+  padding: 4px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; color: #334155; background: #e8eef6;
+  white-space: nowrap;
+}
+.country-chip .table-sub { margin-top: 0; font-weight: 600; }
 .table-muted, .table-sub { color: var(--text-3); font-size: 12px; }
 .account-email { color: var(--text-2); white-space: nowrap; }
 .table-sub { margin-top: 3px; white-space: nowrap; }

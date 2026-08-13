@@ -108,6 +108,13 @@ func (h *Handler) List(c *gin.Context) {
 	if s := c.Query("trial_status"); s != "" {
 		q = q.Where("trial_status = ?", s)
 	}
+	if s := c.Query("register_country"); s != "" {
+		if s == "unknown" {
+			q = q.Where("register_country = ? OR register_country IS NULL", "")
+		} else {
+			q = q.Where("UPPER(register_country) = ?", strings.ToUpper(s))
+		}
+	}
 	if s := c.Query("plan_type"); s != "" {
 		q = q.Where("LOWER(plan_type) = ?", strings.ToLower(s))
 	}

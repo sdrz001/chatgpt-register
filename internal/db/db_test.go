@@ -29,6 +29,9 @@ func TestInitMigratesIntegrationModels(t *testing.T) {
 	}
 	for _, field := range []string{
 		"proxy",
+		"register_country",
+		"register_ip",
+		"register_city",
 		"at_status",
 		"at_error",
 		"at_checked_at",
@@ -153,6 +156,43 @@ func TestInitBackfillsRegistrationCategoryFromMailbox(t *testing.T) {
 	}
 	if category.Scope != "account" || category.Name != mailboxCategory.Name {
 		t.Fatalf("category=%+v", category)
+	}
+}
+
+func TestInitBackfillsRegisterLocationFromLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	database, err := Init(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration := models.Registration{
+		Email: "geo@example.test", Status: "registered",
+		Log: "出口 IP=203.0.113.8 位置=US/Ashburn 时区=America/New_York\npath=/backend-anon/checkout_pricing_config/configs/JP status=200",
+	}
+	if err := database.Create(&registration).Error; err != nil {
+		t.Fatal(err)
+	}
+	firstSQL, err := database.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := firstSQL.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Init(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSQL, err := database.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondSQL.Close()
+	if err := database.First(&registration, registration.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if registration.RegisterCountry != "JP" || registration.RegisterIP != "203.0.113.8" || registration.RegisterCity != "Ashburn" {
+		t.Fatalf("registration=%+v", registration)
 	}
 }
 

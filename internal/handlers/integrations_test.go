@@ -229,6 +229,28 @@ func TestRegistrationListFiltersTrialStatus(t *testing.T) {
 	}
 }
 
+func TestRegistrationListFiltersRegisterCountry(t *testing.T) {
+	handler, router := integrationHandlerTestRouter(t)
+	registrations := []models.Registration{
+		{Email: "jp@example.test", Status: "registered", RegisterCountry: "JP"},
+		{Email: "de@example.test", Status: "registered", RegisterCountry: "DE"},
+		{Email: "none@example.test", Status: "registered"},
+	}
+	if err := handler.DB.Create(&registrations).Error; err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/registrations?register_country=jp", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "jp@example.test") || strings.Contains(response.Body.String(), "de@example.test") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	unknown := httptest.NewRecorder()
+	router.ServeHTTP(unknown, httptest.NewRequest(http.MethodGet, "/registrations?register_country=unknown", nil))
+	if unknown.Code != http.StatusOK || !strings.Contains(unknown.Body.String(), "none@example.test") || strings.Contains(unknown.Body.String(), "jp@example.test") {
+		t.Fatalf("unknown status=%d body=%s", unknown.Code, unknown.Body.String())
+	}
+}
+
 func TestAuthDataWithPlanUpdatesExportedCredentials(t *testing.T) {
 	updated := authDataWithPlan(`{"plan_type":"free","credentials":{"access_token":"secret","plan_type":"free"}}`, "plus")
 	var root map[string]any

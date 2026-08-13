@@ -33,6 +33,15 @@ const TRIAL_PERIOD = {
 const PLAN_LABEL = {
   free: 'Free', go: 'Go', plus: 'Plus', pro: 'Pro', team: 'Team', business: 'Business', enterprise: 'Enterprise', edu: 'Edu',
 };
+const COUNTRY_LABEL = {
+  JP: '日本', US: '美国', DE: '德国', GB: '英国', KR: '韩国', FR: '法国', IT: '意大利',
+  ES: '西班牙', NL: '荷兰', CA: '加拿大', AU: '澳大利亚', BR: '巴西', IN: '印度',
+  ID: '印尼', VN: '越南', TH: '泰国', KH: '柬埔寨', SG: '新加坡', MY: '马来西亚',
+  PH: '菲律宾', TW: '台湾', HK: '香港', CN: '中国', RU: '俄罗斯', TR: '土耳其',
+  PL: '波兰', SE: '瑞典', NO: '挪威', DK: '丹麦', FI: '芬兰', CH: '瑞士',
+  AT: '奥地利', BE: '比利时', IE: '爱尔兰', PT: '葡萄牙', MX: '墨西哥', AR: '阿根廷',
+  CL: '智利', ZA: '南非', AE: '阿联酋', SA: '沙特', IL: '以色列', NZ: '新西兰',
+};
 let page = 1;
 const size = 20;
 let accCache = {};
@@ -52,6 +61,7 @@ async function load() {
   const atStatus = document.getElementById('filter-at-status').value;
   const plan = document.getElementById('filter-plan').value;
   const trialStatus = document.getElementById('filter-trial-status').value;
+  const registerCountry = document.getElementById('filter-register-country').value;
   const category = document.getElementById('filter-account-category').value;
   const params = new URLSearchParams({ page, size });
   if (q) params.set('q', q);
@@ -59,6 +69,7 @@ async function load() {
   if (atStatus) params.set('at_status', atStatus);
   if (plan) params.set('plan_type', plan);
   if (trialStatus) params.set('trial_status', trialStatus);
+  if (registerCountry) params.set('register_country', registerCountry);
   if (category) params.set('category_id', category);
   const r = await api('/api/registrations?' + params);
   const d = await r.json();
@@ -66,10 +77,79 @@ async function load() {
   accTotal = d.total || 0;
   (d.data || []).forEach(x => { accCache[x.id] = x; });
   document.getElementById('rows').innerHTML = (d.data || []).map(rowHtml).join('')
-    || '<tr><td colspan="12" style="text-align:center;color:var(--text-3)">暂无数据</td></tr>';
+    || '<tr><td colspan="13" style="text-align:center;color:var(--text-3)">暂无数据</td></tr>';
+  syncCountryFilter(d.data || []);
   const maxPage = Math.max(1, Math.ceil((d.total || 0) / size));
   renderPager('pager', page, maxPage, p => { page = p; load(); });
   syncBatchBar();
+}
+
+function countryName(code) {
+  const country = String(code || '').toUpperCase();
+  return COUNTRY_LABEL[country] || country;
+}
+
+function registerCountryCell(x) {
+  const country = String(x.register_country || '').toUpperCase();
+  if (!country) return '<span class="table-muted">未知</span>';
+  const title = [countryName(country) + ' ' + country, x.register_city || '', x.register_ip || ''].filter(Boolean).join(' · ');
+  return `<span class="country-chip" title="${esc(title)}">${esc(countryName(country))}<span class="table-sub"> ${esc(country)}</span></span>`;
+}
+
+function syncCountryFilter(rows) {
+  const select = document.getElementById('filter-register-country');
+  if (!select) return;
+  const current = select.value;
+  const seen = new Set(Object.keys(COUNTRY_LABEL));
+  rows.forEach(x => {
+    const country = String(x.register_country || '').toUpperCase();
+    if (country) seen.add(country);
+  });
+  const options = ['<option value="">全部注册地</option>', '<option value="unknown">注册地未知</option>'];
+  [...seen].sort().forEach(code => {
+    options.push(`<option value="${code}">${esc(countryName(code))}</option>`);
+  });
+  select.innerHTML = options.join('');
+  if ([...select.options].some(option => option.value === current)) select.value = current;
+}
+
+function syncCountryFilter(rows) {
+  const select = document.getElementById('filter-register-country');
+  if (!select) return;
+  const current = select.value;
+  const seen = new Set(Object.keys(COUNTRY_LABEL));
+  rows.forEach(x => {
+    const country = String(x.register_country || '').toUpperCase();
+    if (country) seen.add(country);
+  });
+  select.innerHTML = ['<option value="">全部注册地</option>', '<option value="unknown">注册地未知</option>']
+    .concat([...seen].sort().map(code => `<option value="${code}">${esc(countryName(code))}</option>`))
+    .join('');
+  if ([...select.options].some(option => option.value === current)) select.value = current;
+}
+
+function registerCountryCell(x) {
+  const country = String(x.register_country || '').toUpperCase();
+  if (!country) return '<span class="table-muted">未知</span>';
+  const title = [countryName(country) + ' ' + country, x.register_city || '', x.register_ip || ''].filter(Boolean).join(' · ');
+  return `<span class="country-chip" title="${esc(title)}">${esc(countryName(country))}<span class="table-sub"> ${esc(country)}</span></span>`;
+}
+
+function syncCountryFilter(rows) {
+  const select = document.getElementById('filter-register-country');
+  if (!select) return;
+  const current = select.value;
+  const seen = new Set(Object.keys(COUNTRY_LABEL));
+  rows.forEach(x => {
+    const country = String(x.register_country || '').toUpperCase();
+    if (country) seen.add(country);
+  });
+  const options = ['<option value="">全部注册地</option>', '<option value="unknown">注册地未知</option>'];
+  [...seen].sort().forEach(code => {
+    options.push(`<option value="${code}">${esc(countryName(code))}</option>`);
+  });
+  select.innerHTML = options.join('');
+  if ([...select.options].some(option => option.value === current)) select.value = current;
 }
 
 function rowHtml(x) {
@@ -100,6 +180,7 @@ function rowHtml(x) {
       <td class="col-check"><input type="checkbox" ${accSelected.has(x.id) ? 'checked' : ''} onclick="toggleSelect(${x.id}, this.checked)"></td>
       <td><div class="account-email">${esc(x.email)}</div><div class="table-sub">${fmtTime(x.created_at)}</div></td>
       <td>${x.category ? `<span class="category-chip">${esc(x.category.name)}</span>` : '<span class="table-muted">未分类</span>'}</td>
+      <td>${registerCountryCell(x)}</td>
       <td><span class="badge at-${esc(atStatus)}" title="${esc(atTitle)}">${AT_STATUS[atStatus] || esc(atStatus)}</span></td>
       <td><span class="plan-badge plan-${esc(plan || 'unknown')}">${PLAN_LABEL[plan] || esc(plan || '未知')}</span></td>
       <td><span class="badge trial-${esc(trialStatus)}" title="${esc(trialTitle)}">${TRIAL_STATUS[trialStatus] || esc(trialStatus)}</span></td>
@@ -697,7 +778,7 @@ async function del(id) {
 document.getElementById('search').addEventListener('keydown', e => {
   if (e.key === 'Enter') { page = 1; load(); }
 });
-['filter-status', 'filter-at-status', 'filter-plan', 'filter-trial-status', 'filter-account-category'].forEach(id => {
+['filter-status', 'filter-at-status', 'filter-plan', 'filter-trial-status', 'filter-register-country', 'filter-account-category'].forEach(id => {
   document.getElementById(id).addEventListener('change', () => { page = 1; load(); });
 });
 document.getElementById('new-account-category').addEventListener('keydown', event => {

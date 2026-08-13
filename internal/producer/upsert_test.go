@@ -298,6 +298,31 @@ func TestUpsertWithNewAuthResetsTrialEligibility(t *testing.T) {
 	}
 }
 
+func TestUpsertPersistsRegisterLocation(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Registration{}); err != nil {
+		t.Fatal(err)
+	}
+	existing := models.Registration{Email: "geo@example.test", Status: "registering"}
+	if err := database.Create(&existing).Error; err != nil {
+		t.Fatal(err)
+	}
+	producer := &Producer{db: database}
+	producer.upsert(models.Registration{
+		Email: existing.Email, Status: "registered",
+		RegisterCountry: "JP", RegisterIP: "203.0.113.8", RegisterCity: "Tokyo",
+	})
+	if err := database.First(&existing, existing.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if existing.RegisterCountry != "JP" || existing.RegisterIP != "203.0.113.8" || existing.RegisterCity != "Tokyo" {
+		t.Fatalf("registration=%+v", existing)
+	}
+}
+
 func TestUpsertPersistsCategoryWithoutClearingIntegrationState(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

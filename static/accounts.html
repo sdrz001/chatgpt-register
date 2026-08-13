@@ -62,6 +62,10 @@
         <option value="checking">试用资格检测中</option>
         <option value="error">试用资格检测失败</option>
       </select>
+      <select id="filter-register-country" class="px-input">
+        <option value="">全部注册地</option>
+        <option value="unknown">注册地未知</option>
+      </select>
       <select id="filter-account-category" class="px-input">
         <option value="">全部分类</option>
         <option value="uncategorized">未分类</option>
@@ -115,7 +119,7 @@
       <table class="px-table">
         <thead><tr>
           <th class="col-check"><input type="checkbox" id="acc-check-all" onclick="toggleSelectAll(this.checked)"></th>
-          <th>邮箱</th><th>分类</th><th>AT 状态</th><th>套餐</th><th>0元试用</th><th>Plus 邮件</th><th>注册状态</th><th>Codex</th><th>Sub2API</th><th>出库</th><th>操作</th>
+          <th>邮箱</th><th>分类</th><th>注册地</th><th>AT 状态</th><th>套餐</th><th>0元试用</th><th>Plus 邮件</th><th>注册状态</th><th>Codex</th><th>Sub2API</th><th>出库</th><th>操作</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
