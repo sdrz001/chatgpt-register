@@ -47,9 +47,8 @@ const (
 
 // openAI 验证码：6 位数字。
 var (
-	codeRe            = regexp.MustCompile(`\b(\d{6})\b`)
-	producerNow       = time.Now
-	codeURLReuseDelay = 15 * time.Second
+	codeRe      = regexp.MustCompile(`\b(\d{6})\b`)
+	producerNow = time.Now
 )
 
 // Config 从系统设置装载的运行参数。
@@ -456,6 +455,12 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 	ignoredMessageIDs := map[string]struct{}{}
 	account := mailAccount(mb)
 	if existingMessages, snapshotErr := p.mail.ListMessages(ctx, account, 30); snapshotErr != nil {
+		if strings.TrimSpace(account.CodeURL) != "" {
+			err = fmt.Errorf("读取注册前验证码基线: %w", snapshotErr)
+			appendLog("✗ 失败: " + err.Error())
+			p.setRegistrationFailed(email, err.Error(), logBuf.String())
+			return err
+		}
 		appendLog("⚠ 读取注册前邮件快照失败，将仅按邮件时间过滤旧验证码: " + snapshotErr.Error())
 		since = time.Now()
 	} else {
@@ -557,7 +562,7 @@ func (p *Producer) fetchCodeAfter(ctx context.Context, mb models.Mailbox, since 
 		if err == nil {
 			for _, m := range msgs {
 				_, ignored := ignoredIDs[m.ID]
-				if (ignored && (!codeURL || time.Since(startedAt) < codeURLReuseDelay)) || (!codeURL && m.ReceivedAt.Before(since)) || !looksLikeOpenAI(m) {
+				if ignored || (!codeURL && m.ReceivedAt.Before(since)) || !looksLikeOpenAI(m) {
 					continue
 				}
 				if code := codeRe.FindStringSubmatch(m.Subject); code != nil {

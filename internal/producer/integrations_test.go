@@ -237,21 +237,41 @@ func TestFetchCodeAfterConsumesMessageID(t *testing.T) {
 	}
 }
 
-func TestFetchCodeAfterReusesCodeURLValueAfterDelay(t *testing.T) {
-	originalDelay := codeURLReuseDelay
-	codeURLReuseDelay = 0
-	t.Cleanup(func() { codeURLReuseDelay = originalDelay })
-	message := mailfetch.Message{
-		ID: "api-code-same", From: "codes.example.test", FromName: "验证码 API",
+func TestFetchCodeAfterCodeURLWaitsForValueAfterSnapshot(t *testing.T) {
+	oldMessage := mailfetch.Message{
+		ID: "api-code-old", From: "codes.example.test", FromName: "验证码 API",
 		Subject: "OpenAI verification code 333333", ReceivedAt: time.Now(), Text: "333333",
 	}
+	newMessage := mailfetch.Message{
+		ID: "api-code-new", From: "codes.example.test", FromName: "验证码 API",
+		Subject: "OpenAI verification code 444444", ReceivedAt: time.Now(), Text: "444444",
+	}
+	calls := 0
 	producer := &Producer{mail: fakeMailClient{list: func(context.Context, mailfetch.Account, int) ([]mailfetch.Message, error) {
-		return []mailfetch.Message{message}, nil
+		calls++
+		if calls == 1 {
+			return []mailfetch.Message{oldMessage}, nil
+		}
+		return []mailfetch.Message{oldMessage, newMessage}, nil
 	}}}
-	ignored := map[string]struct{}{message.ID: {}}
+	ignored := map[string]struct{}{oldMessage.ID: {}}
 	mailbox := models.Mailbox{Email: integrationEmail, CodeURL: "https://codes.example.test/latest"}
 	code, err := producer.fetchCodeAfter(context.Background(), mailbox, time.Now(), ignored)
-	if err != nil || code != "333333" {
+	if err != nil || code != "444444" || calls < 2 {
+		t.Fatalf("code=%q calls=%d error=%v", code, calls, err)
+	}
+}
+
+func TestFetchCodeAfterRejectsMessagesBeforeRegistrationStart(t *testing.T) {
+	startedAt := time.Now()
+	producer := &Producer{mail: fakeMailClient{list: func(context.Context, mailfetch.Account, int) ([]mailfetch.Message, error) {
+		return []mailfetch.Message{
+			{ID: "old", From: "noreply@openai.com", Subject: "Old code 111111", ReceivedAt: startedAt.Add(-time.Minute)},
+			{ID: "new", From: "noreply@openai.com", Subject: "New code 222222", ReceivedAt: startedAt.Add(time.Second)},
+		}, nil
+	}}}
+	code, err := producer.fetchCodeAfter(context.Background(), models.Mailbox{Email: integrationEmail}, startedAt, map[string]struct{}{})
+	if err != nil || code != "222222" {
 		t.Fatalf("code=%q error=%v", code, err)
 	}
 }
