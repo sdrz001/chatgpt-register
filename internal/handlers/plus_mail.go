@@ -170,7 +170,12 @@ func (h *Handler) checkRegistrationPlusMail(ctx context.Context, registration mo
 		item.Error = "未找到关联邮箱"
 		return item
 	}
-	account := mailboxAccount(mailbox)
+	account, accountErr := h.mailboxAccount(mailbox)
+	if accountErr != nil {
+		item.Status = "error"
+		item.Error = plusMailError(accountErr)
+		return item
+	}
 	var messages []mailfetch.Message
 	if strings.TrimSpace(mailbox.CodeURL) != "" {
 		archive, fetchErr := h.Mail.GetCodeURLArchive(ctx, account, plusMailLimit)

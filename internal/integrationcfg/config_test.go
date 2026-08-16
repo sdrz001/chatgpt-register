@@ -33,6 +33,35 @@ func TestLoadAndBooleanSettings(t *testing.T) {
 	}
 }
 
+func TestDomainMailConfigDefaultsAndValidation(t *testing.T) {
+	config, err := (Values{}).DomainMail()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Source != "import" || config.Client.BaseURL != "https://bikaqiuruanjian.com" || config.ExpiryTime != 3600000 {
+		t.Fatalf("defaults=%+v", config)
+	}
+	config, err = (Values{
+		"mailbox_source": "domain_api", "domain_mail_url": "https://mail.example.test",
+		"domain_mail_api_key": "key", "domain_mail_domain": "moemail.app", "domain_mail_expiry_time": "0",
+	}).DomainMail()
+	if err != nil || config.Domain != "moemail.app" || config.ExpiryTime != 0 || config.Client.APIKey != "key" {
+		t.Fatalf("config=%+v error=%v", config, err)
+	}
+	for name, values := range map[string]Values{
+		"source": {"mailbox_source": "other"},
+		"key":    {"mailbox_source": "domain_api", "domain_mail_domain": "moemail.app"},
+		"domain": {"mailbox_source": "domain_api", "domain_mail_api_key": "key", "domain_mail_domain": "bad@domain"},
+		"expiry": {"domain_mail_expiry_time": "1000"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := values.DomainMail(); err == nil {
+				t.Fatal("DomainMail returned nil error")
+			}
+		})
+	}
+}
+
 func TestSMSConfigDefaultsAndModes(t *testing.T) {
 	values := Values{"sms_api_key": "key"}
 	config, err := values.SMS()

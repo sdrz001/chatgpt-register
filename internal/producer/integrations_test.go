@@ -45,6 +45,27 @@ func (f fakeMailClient) GetMessage(ctx context.Context, account mailfetch.Accoun
 	return f.get(ctx, account, id)
 }
 
+func domainMailFetchProducer(t *testing.T, mail fakeMailClient) *Producer {
+	t.Helper()
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Setting{}); err != nil {
+		t.Fatal(err)
+	}
+	settings := []models.Setting{
+		{Key: "mailbox_source", Value: "domain_api"},
+		{Key: "domain_mail_url", Value: "https://mail.example.test"},
+		{Key: "domain_mail_api_key", Value: "secret"},
+		{Key: "domain_mail_domain", Value: "example.test"},
+	}
+	if err := database.Create(&settings).Error; err != nil {
+		t.Fatal(err)
+	}
+	return &Producer{db: database, mail: mail}
+}
+
 func integrationTestProducer(t *testing.T, serverURL string) (*Producer, models.Registration) {
 	t.Helper()
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -259,6 +280,43 @@ func TestFetchCodeAfterCodeURLWaitsForValueAfterSnapshot(t *testing.T) {
 	code, err := producer.fetchCodeAfter(context.Background(), mailbox, time.Now(), ignored)
 	if err != nil || code != "444444" || calls < 2 {
 		t.Fatalf("code=%q calls=%d error=%v", code, calls, err)
+	}
+}
+
+func TestFetchCodeAfterDomainMailWaitsForNewMessageID(t *testing.T) {
+	oldMessage := mailfetch.Message{ID: "old-domain-message", From: "noreply@openai.com", Subject: "Old code 555555"}
+	newMessage := mailfetch.Message{ID: "new-domain-message", From: "noreply@openai.com", Subject: "New code 666666"}
+	calls := 0
+	producer := domainMailFetchProducer(t, fakeMailClient{list: func(context.Context, mailfetch.Account, int) ([]mailfetch.Message, error) {
+		calls++
+		if calls == 1 {
+			return []mailfetch.Message{oldMessage}, nil
+		}
+		return []mailfetch.Message{oldMessage, newMessage}, nil
+	}})
+	mailbox := models.Mailbox{Email: integrationEmail, Provider: "domain_api", RemoteMailboxID: "remote-box"}
+	code, err := producer.fetchCodeAfter(context.Background(), mailbox, time.Now(), map[string]struct{}{oldMessage.ID: {}})
+	if err != nil || code != "666666" || calls < 2 {
+		t.Fatalf("code=%q calls=%d error=%v", code, calls, err)
+	}
+}
+
+func TestFetchCodeAfterDomainMailReadsHTMLOnlyDetail(t *testing.T) {
+	producer := domainMailFetchProducer(t, fakeMailClient{
+		list: func(context.Context, mailfetch.Account, int) ([]mailfetch.Message, error) {
+			return []mailfetch.Message{{ID: "new-domain-message", Subject: "Verify your email"}}, nil
+		},
+		get: func(context.Context, mailfetch.Account, string) (mailfetch.Message, error) {
+			return mailfetch.Message{
+				ID: "new-domain-message", From: "noreply@openai.com", Subject: "Verify your email",
+				HTML: `<html><body><p>Your verification code is <strong>731942</strong></p></body></html>`,
+			}, nil
+		},
+	})
+	mailbox := models.Mailbox{Email: integrationEmail, Provider: "domain_api", RemoteMailboxID: "remote-box"}
+	code, err := producer.fetchCodeAfter(context.Background(), mailbox, time.Now(), map[string]struct{}{})
+	if err != nil || code != "731942" {
+		t.Fatalf("code=%q error=%v", code, err)
 	}
 }
 

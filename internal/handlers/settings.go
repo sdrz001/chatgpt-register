@@ -16,16 +16,18 @@ import (
 
 // 内部保留 key（如 JWT 密钥），不允许通过设置接口读取或修改
 var reservedSettingKeys = map[string]bool{
-	"jwt_secret":                 true,
-	"sms_api_key_configured":     true,
-	"sub2api_api_key_configured": true,
-	"proxy_enabled":              true,
-	"proxy_list":                 true,
+	"jwt_secret":                     true,
+	"sms_api_key_configured":         true,
+	"sub2api_api_key_configured":     true,
+	"domain_mail_api_key_configured": true,
+	"proxy_enabled":                  true,
+	"proxy_list":                     true,
 }
 
 var secretSettingKeys = map[string]string{
-	"sms_api_key":     "sms_api_key_configured",
-	"sub2api_api_key": "sub2api_api_key_configured",
+	"sms_api_key":         "sms_api_key_configured",
+	"sub2api_api_key":     "sub2api_api_key_configured",
+	"domain_mail_api_key": "domain_mail_api_key_configured",
 }
 
 var allowedSettingKeys = map[string]bool{
@@ -35,6 +37,8 @@ var allowedSettingKeys = map[string]bool{
 	"sms_country": true, "sms_random_countries": true, "sms_max_price": true, "sms_timeout": true, "sms_phone_attempts": true,
 	"sub2api_auto_import": true, "sub2api_url": true, "sub2api_api_key": true,
 	"sub2api_group_ids": true, "sub2api_concurrency": true, "sub2api_priority": true, "sub2api_timeout": true,
+	"mailbox_source": true, "domain_mail_url": true, "domain_mail_api_key": true,
+	"domain_mail_domain": true, "domain_mail_expiry_time": true,
 }
 
 func (h *Handler) SettingsGet(c *gin.Context) {
@@ -68,6 +72,15 @@ func (h *Handler) SettingsGet(c *gin.Context) {
 	}
 	if strings.TrimSpace(out["browser_backend"]) == "" {
 		out["browser_backend"] = "rod"
+	}
+	if strings.TrimSpace(out["mailbox_source"]) == "" {
+		out["mailbox_source"] = "import"
+	}
+	if strings.TrimSpace(out["domain_mail_url"]) == "" {
+		out["domain_mail_url"] = "https://bikaqiuruanjian.com"
+	}
+	if strings.TrimSpace(out["domain_mail_expiry_time"]) == "" {
+		out["domain_mail_expiry_time"] = "3600000"
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -169,6 +182,11 @@ func validateSettings(values integrationcfg.Values, updates map[string]string) e
 			smsValues["sms_api_key"] = "not-enabled"
 		}
 		if _, err := smsValues.SMS(); err != nil {
+			return err
+		}
+	}
+	if touchesAny(updates, "mailbox_source", "domain_mail_url", "domain_mail_api_key", "domain_mail_domain", "domain_mail_expiry_time") {
+		if _, err := values.DomainMail(); err != nil {
 			return err
 		}
 	}

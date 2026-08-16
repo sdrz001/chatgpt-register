@@ -24,6 +24,7 @@ import (
 	"chatgpt-register/internal/categorysync"
 	"chatgpt-register/internal/codexoauth"
 	"chatgpt-register/internal/codexreg"
+	"chatgpt-register/internal/domainmail"
 	"chatgpt-register/internal/emailalias"
 	"chatgpt-register/internal/integrationcfg"
 	"chatgpt-register/internal/mailfetch"
@@ -377,7 +378,7 @@ func (p *Producer) nextJob(cfg Config, scope Scope) (models.Mailbox, string, boo
 
 	// Pass 2：母号已成功、该邮箱空闲、裂变未满 → 注册一个新的别名子号
 	for _, mb := range mailboxes {
-		if p.mailboxBusy(mb.ID) {
+		if p.mailboxBusy(mb.ID) || strings.EqualFold(strings.TrimSpace(mb.Provider), domainmail.Provider) {
 			continue
 		}
 		if !p.isRegistered(mb.Email) {
@@ -403,8 +404,29 @@ func (p *Producer) nextJob(cfg Config, scope Scope) (models.Mailbox, string, boo
 func mailAccount(mailbox models.Mailbox) mailfetch.Account {
 	return mailfetch.Account{
 		Email: mailbox.Email, Provider: mailbox.Provider, ClientID: mailbox.ClientID,
-		RefreshToken: mailbox.RefreshToken, CodeURL: mailbox.CodeURL,
+		RefreshToken: mailbox.RefreshToken, CodeURL: mailbox.CodeURL, RemoteMailboxID: mailbox.RemoteMailboxID,
 	}
+}
+
+func (p *Producer) mailAccount(mailbox models.Mailbox) (mailfetch.Account, error) {
+	account := mailAccount(mailbox)
+	if !strings.EqualFold(strings.TrimSpace(mailbox.Provider), domainmail.Provider) {
+		return account, nil
+	}
+	if p.db == nil {
+		return account, fmt.Errorf("域名邮数据库未初始化")
+	}
+	values, err := integrationcfg.Load(p.db)
+	if err != nil {
+		return account, fmt.Errorf("加载域名邮设置: %w", err)
+	}
+	config, err := values.DomainMail()
+	if err != nil {
+		return account, err
+	}
+	account.DomainMailBaseURL = config.Client.BaseURL
+	account.DomainMailAPIKey = config.Client.APIKey
+	return account, nil
 }
 
 func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox, email string, isMother bool) error {
@@ -453,9 +475,19 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 
 	since := time.Now().Add(-30 * time.Second)
 	ignoredMessageIDs := map[string]struct{}{}
-	account := mailAccount(mb)
-	if existingMessages, snapshotErr := p.mail.ListMessages(ctx, account, 30); snapshotErr != nil {
-		if strings.TrimSpace(account.CodeURL) != "" {
+	account, accountErr := p.mailAccount(mb)
+	if accountErr != nil {
+		err = fmt.Errorf("读取邮箱配置: %w", accountErr)
+		appendLog("✗ 失败: " + err.Error())
+		p.setRegistrationFailed(email, err.Error(), logBuf.String())
+		return err
+	}
+	snapshotLimit := 30
+	if strings.EqualFold(strings.TrimSpace(account.Provider), domainmail.Provider) {
+		snapshotLimit = 2000
+	}
+	if existingMessages, snapshotErr := p.mail.ListMessages(ctx, account, snapshotLimit); snapshotErr != nil {
+		if strings.TrimSpace(account.CodeURL) != "" || strings.EqualFold(strings.TrimSpace(account.Provider), domainmail.Provider) {
 			err = fmt.Errorf("读取注册前验证码基线: %w", snapshotErr)
 			appendLog("✗ 失败: " + err.Error())
 			p.setRegistrationFailed(email, err.Error(), logBuf.String())
@@ -550,32 +582,44 @@ func (p *Producer) fetchCodeAfter(ctx context.Context, mb models.Mailbox, since 
 	if ignoredIDs == nil {
 		ignoredIDs = map[string]struct{}{}
 	}
-	acc := mailAccount(mb)
-	codeURL := strings.TrimSpace(acc.CodeURL) != ""
+	acc, accountErr := p.mailAccount(mb)
+	if accountErr != nil {
+		return "", fmt.Errorf("读取邮箱配置: %w", accountErr)
+	}
+	usesMessageSnapshot := strings.TrimSpace(acc.CodeURL) != "" || strings.EqualFold(strings.TrimSpace(acc.Provider), domainmail.Provider)
 	startedAt := time.Now()
 	deadline := startedAt.Add(codePollTimeout)
+	var lastFetchErr error
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		msgs, err := p.mail.ListMessages(ctx, acc, 15)
-		if err == nil {
-			for _, m := range msgs {
-				_, ignored := ignoredIDs[m.ID]
-				if ignored || (!codeURL && m.ReceivedAt.Before(since)) || !looksLikeOpenAI(m) {
+		msgs, err := p.mail.ListMessages(ctx, acc, 30)
+		if err != nil {
+			lastFetchErr = fmt.Errorf("读取邮件列表: %w", err)
+		} else {
+			for _, message := range msgs {
+				if _, ignored := ignoredIDs[message.ID]; ignored {
 					continue
 				}
-				if code := codeRe.FindStringSubmatch(m.Subject); code != nil {
-					ignoredIDs[m.ID] = struct{}{}
-					return code[1], nil
-				}
-				full, gerr := p.mail.GetMessage(ctx, acc, m.ID)
-				if gerr != nil {
+				if !usesMessageSnapshot && message.ReceivedAt.Before(since) {
 					continue
 				}
-				if code := codeRe.FindStringSubmatch(full.Subject + " " + full.Text); code != nil {
-					ignoredIDs[m.ID] = struct{}{}
-					return code[1], nil
+				if code := verificationCode(message); code != "" && looksLikeOpenAI(message) {
+					ignoredIDs[message.ID] = struct{}{}
+					return code, nil
+				}
+				full, detailErr := p.mail.GetMessage(ctx, acc, message.ID)
+				if detailErr != nil {
+					lastFetchErr = fmt.Errorf("读取邮件 %s 正文: %w", message.ID, detailErr)
+					continue
+				}
+				if !looksLikeOpenAI(message) && !looksLikeOpenAI(full) {
+					continue
+				}
+				if code := verificationCode(full); code != "" {
+					ignoredIDs[message.ID] = struct{}{}
+					return code, nil
 				}
 			}
 		}
@@ -593,12 +637,23 @@ func (p *Producer) fetchCodeAfter(ctx context.Context, mb models.Mailbox, since 
 		case <-timer.C:
 		}
 	}
+	if lastFetchErr != nil {
+		return "", fmt.Errorf("超时未读取到验证码，最近一次邮件错误: %w", lastFetchErr)
+	}
 	return "", fmt.Errorf("超时未收到验证码邮件")
 }
 
+func verificationCode(message mailfetch.Message) string {
+	match := codeRe.FindStringSubmatch(message.Subject + " " + message.Text + " " + message.HTML)
+	if len(match) == 2 {
+		return match[1]
+	}
+	return ""
+}
+
 func looksLikeOpenAI(m mailfetch.Message) bool {
-	s := strings.ToLower(m.From + " " + m.FromName + " " + m.Subject)
-	return strings.Contains(s, "openai") || strings.Contains(s, "chatgpt") || strings.Contains(s, "code")
+	s := strings.ToLower(m.From + " " + m.FromName + " " + m.Subject + " " + m.Text + " " + m.HTML)
+	return strings.Contains(s, "openai") || strings.Contains(s, "chatgpt") || strings.Contains(s, "verification code")
 }
 
 // ---- inflight / 计数 ----

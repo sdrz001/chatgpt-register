@@ -164,6 +164,58 @@
 
       <div class="px-panel settings-card">
         <div class="settings-head">
+          <span class="settings-icon violet">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/><path d="M17 3v4M15 5h4"/></svg>
+          </span>
+          <div>
+            <h2>邮箱来源</h2>
+            <p>保留导入邮箱，同时支持通过域名邮 API 生成并自动取码</p>
+          </div>
+        </div>
+        <div class="field">
+          <label>新增邮箱方式</label>
+          <select id="set-mailbox-source" class="px-input" autocomplete="off" onchange="updateDomainMailMode()">
+            <option value="import">导入邮箱</option>
+            <option value="domain_api">域名邮 API</option>
+          </select>
+        </div>
+        <div id="domain-mail-fields" class="settings-form-grid">
+          <div class="field settings-span-2">
+            <label>API 地址</label>
+            <span class="field-hint">系统会请求 /api/config、/api/emails/generate 和邮箱邮件接口</span>
+            <input id="set-domain-mail-url" class="px-input" type="url" autocomplete="off" placeholder="https://bikaqiuruanjian.com">
+          </div>
+          <div class="field settings-span-2">
+            <label>X-API-Key</label>
+            <span id="domain-mail-key-hint" class="field-hint">尚未配置</span>
+            <input id="set-domain-mail-api-key" class="px-input" type="text" autocomplete="off" spellcheck="false" autocapitalize="none" readonly data-user-edited="0" data-lpignore="true" data-1p-ignore="true" style="-webkit-text-security:disc" onfocus="enableDomainMailKeyInput(this)" placeholder="留空保留已保存密钥">
+          </div>
+          <div class="field">
+            <label>邮箱域名</label>
+            <span class="field-hint">点击下方按钮从系统配置读取</span>
+            <select id="set-domain-mail-domain" class="px-input">
+              <option value="">请先拉取可用域名</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>邮箱有效期</label>
+            <select id="set-domain-mail-expiry" class="px-input">
+              <option value="3600000">1 小时</option>
+              <option value="86400000">1 天</option>
+              <option value="604800000">7 天</option>
+              <option value="0">永久</option>
+            </select>
+          </div>
+        </div>
+        <div id="domain-mail-config-result" class="proxy-result" style="display:none"></div>
+        <div class="settings-foot">
+          <button id="domain-mail-domains-btn" class="px-btn ghost" onclick="loadDomainMailDomains()">获取可用域名</button>
+          <button class="px-btn primary" onclick="saveDomainMailSettings()">保存邮箱配置</button>
+        </div>
+      </div>
+
+      <div class="px-panel settings-card">
+        <div class="settings-head">
           <span class="settings-icon blue">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.9.33 1.78.62 2.63a2 2 0 0 1-.45 2.11L8 9.73a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.85.29 1.73.5 2.63.62A2 2 0 0 1 22 16.92z"/></svg>
           </span>
@@ -329,6 +381,12 @@ let proxyPools = [];
 let currentProxyPoolID = 0;
 let defaultProxyPoolID = 0;
 
+function enableDomainMailKeyInput(input) {
+  input.value = '';
+  input.readOnly = false;
+  input.dataset.userEdited = '1';
+}
+
 async function loadSettings() {
   const r = await api('/api/settings');
   const d = await r.json();
@@ -358,15 +416,44 @@ async function loadSettings() {
   document.getElementById('set-sub2api-priority').value = d.sub2api_priority || '1';
   document.getElementById('set-sub2api-timeout').value = d.sub2api_timeout || '60';
   fillSub2APIGroups([], parseIDList(d.sub2api_group_ids));
+  document.getElementById('set-mailbox-source').value = d.mailbox_source || 'import';
+  document.getElementById('set-domain-mail-url').value = d.domain_mail_url || 'https://bikaqiuruanjian.com';
+  const domainKeyInput = document.getElementById('set-domain-mail-api-key');
+  domainKeyInput.value = '';
+  domainKeyInput.readOnly = true;
+  domainKeyInput.dataset.userEdited = '0';
+  document.getElementById('domain-mail-key-hint').textContent = d.domain_mail_api_key_configured === '1' ? '已保存 API Key；留空保持不变' : '尚未配置';
+  fillDomainMailDomains([], d.domain_mail_domain || '');
+  document.getElementById('set-domain-mail-expiry').value = d.domain_mail_expiry_time || '3600000';
   syncSelect('set-browser-backend');
   syncSelect('set-sms-platform');
   syncSelect('set-sms-country');
+  syncSelect('set-mailbox-source');
+  syncSelect('set-domain-mail-expiry');
   updateSMSCountryMode();
+  updateDomainMailMode();
 }
 
 function updateBrowserBackend() {
   const backend = document.getElementById('set-browser-backend').value;
   document.getElementById('set-python-executable').disabled = backend === 'rod';
+}
+
+function updateDomainMailMode() {
+  const enabled = document.getElementById('set-mailbox-source').value === 'domain_api';
+  document.getElementById('domain-mail-fields').style.display = enabled ? 'grid' : 'none';
+  document.getElementById('domain-mail-domains-btn').style.display = enabled ? '' : 'none';
+}
+
+function fillDomainMailDomains(domains, selected) {
+  const select = document.getElementById('set-domain-mail-domain');
+  const values = [...new Set((domains || []).map(value => String(value || '').trim()).filter(Boolean))];
+  if (selected && !values.includes(selected)) values.unshift(selected);
+  select.innerHTML = values.length
+    ? values.map(value => '<option value="' + esc(value) + '">' + esc(value) + '</option>').join('')
+    : '<option value="">请先拉取可用域名</option>';
+  select.value = selected || values[0] || '';
+  if (select._rebuild) select._rebuild();
 }
 
 function updateBrowserModeLabel() {
@@ -555,6 +642,63 @@ async function saveSettingBody(body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+}
+
+async function loadDomainMailDomains() {
+  const url = document.getElementById('set-domain-mail-url').value.trim();
+  const keyInput = document.getElementById('set-domain-mail-api-key');
+  const key = keyInput.dataset.userEdited === '1' ? keyInput.value.trim() : '';
+  const btn = document.getElementById('domain-mail-domains-btn');
+  const box = document.getElementById('domain-mail-config-result');
+  if (!url) return toast('请填写域名邮 API 地址', true);
+  btn.disabled = true;
+  box.style.display = 'flex';
+  box.className = 'proxy-result testing';
+  box.innerHTML = '<span class="spinner"></span> 正在读取系统配置…';
+  try {
+    const r = await api('/api/domain-mail/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, api_key: key }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      box.className = 'proxy-result fail';
+      box.textContent = d.error || '系统配置读取失败';
+      return;
+    }
+    const current = document.getElementById('set-domain-mail-domain').value;
+    fillDomainMailDomains(d.domains || [], current);
+    box.className = 'proxy-result ok';
+    box.textContent = '已读取 ' + (d.domains || []).length + ' 个可用域名';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function saveDomainMailSettings() {
+  const source = document.getElementById('set-mailbox-source').value;
+  const url = document.getElementById('set-domain-mail-url').value.trim();
+  const domain = document.getElementById('set-domain-mail-domain').value;
+  if (source === 'domain_api' && !url) return toast('请填写域名邮 API 地址', true);
+  if (source === 'domain_api' && !domain) return toast('请选择域名邮域名', true);
+  const body = {
+    mailbox_source: source,
+    domain_mail_url: url,
+    domain_mail_api_key: document.getElementById('set-domain-mail-api-key').dataset.userEdited === '1' ? document.getElementById('set-domain-mail-api-key').value.trim() : '',
+    domain_mail_domain: domain,
+    domain_mail_expiry_time: document.getElementById('set-domain-mail-expiry').value,
+  };
+  const r = await saveSettingBody(body);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(d.error || '保存失败', true);
+  if (body.domain_mail_api_key) {
+    const keyInput = document.getElementById('set-domain-mail-api-key');
+    keyInput.value = '';
+    keyInput.readOnly = true;
+    keyInput.dataset.userEdited = '0';
+    document.getElementById('domain-mail-key-hint').textContent = '已保存 API Key；留空保持不变';
+  }
+  toast('邮箱来源配置已保存');
 }
 
 async function saveSMSSettings() {

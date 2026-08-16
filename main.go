@@ -86,6 +86,8 @@ func main() {
 		api.GET("/mailboxes", h.MailboxList)
 		api.POST("/mailboxes", h.MailboxCreate)
 		api.POST("/mailboxes/import", h.MailboxImport)
+		api.POST("/mailboxes/generate", h.MailboxGenerate)
+		api.POST("/domain-mail/config", h.DomainMailConfig)
 		api.POST("/mailboxes/:id/verify", h.MailboxVerify)
 		api.PUT("/mailboxes/:id", h.MailboxUpdate)
 		api.DELETE("/mailboxes/:id", h.MailboxDelete)

@@ -58,8 +58,10 @@ func TestInitMigratesIntegrationModels(t *testing.T) {
 			t.Fatalf("registrations.%s missing", field)
 		}
 	}
-	if !database.Migrator().HasColumn(&models.Mailbox{}, "category_id") {
-		t.Fatal("mailboxes.category_id missing")
+	for _, field := range []string{"category_id", "remote_mailbox_id"} {
+		if !database.Migrator().HasColumn(&models.Mailbox{}, field) {
+			t.Fatalf("mailboxes.%s missing", field)
+		}
 	}
 }
 

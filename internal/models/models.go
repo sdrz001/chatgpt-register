@@ -31,6 +31,7 @@ type Mailbox struct {
 	ClientID          string    `gorm:"size:255" json:"client_id"`
 	RefreshToken      string    `gorm:"type:text" json:"refresh_token"`
 	CodeURL           string    `gorm:"type:text" json:"-"`
+	RemoteMailboxID   string    `gorm:"size:255;index" json:"-"`
 	Status            string    `gorm:"size:32;default:unverified" json:"status"`
 	CategoryID        *uint     `gorm:"index" json:"category_id"`
 	Category          *Category `gorm:"constraint:OnUpdate:CASCADE,OnDelete:SET NULL;" json:"category,omitempty"`

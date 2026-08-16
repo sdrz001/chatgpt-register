@@ -47,9 +47,10 @@ func settingsTestHandler(t *testing.T) (*Handler, *gin.Engine) {
 func TestSettingsSecretsAreWriteOnly(t *testing.T) {
 	h, r := settingsTestHandler(t)
 	for key, value := range map[string]string{
-		"sms_api_key":     "sms-secret",
-		"sub2api_api_key": "sub-secret",
-		"sub2api_url":     "https://sub.example.test",
+		"sms_api_key":         "sms-secret",
+		"sub2api_api_key":     "sub-secret",
+		"sub2api_url":         "https://sub.example.test",
+		"domain_mail_api_key": "domain-secret",
 	} {
 		if err := h.DB.Create(&models.Setting{Key: key, Value: value}).Error; err != nil {
 			t.Fatal(err)
@@ -61,14 +62,14 @@ func TestSettingsSecretsAreWriteOnly(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	if strings.Contains(response.Body.String(), "sms-secret") || strings.Contains(response.Body.String(), "sub-secret") {
+	if strings.Contains(response.Body.String(), "sms-secret") || strings.Contains(response.Body.String(), "sub-secret") || strings.Contains(response.Body.String(), "domain-secret") {
 		t.Fatalf("secret leaked: %s", response.Body.String())
 	}
 	var body map[string]string
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body["sms_api_key_configured"] != "1" || body["sub2api_api_key_configured"] != "1" {
+	if body["sms_api_key_configured"] != "1" || body["sub2api_api_key_configured"] != "1" || body["domain_mail_api_key_configured"] != "1" {
 		t.Fatalf("configured flags=%v", body)
 	}
 	if body["sub2api_url"] != "https://sub.example.test" {

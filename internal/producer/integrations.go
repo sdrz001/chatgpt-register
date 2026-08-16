@@ -12,6 +12,7 @@ import (
 
 	"chatgpt-register/internal/codexoauth"
 	"chatgpt-register/internal/codexreg"
+	"chatgpt-register/internal/domainmail"
 	"chatgpt-register/internal/integrationcfg"
 	"chatgpt-register/internal/models"
 	"chatgpt-register/internal/smsactivate"
@@ -61,8 +62,18 @@ func (p *Producer) AuthorizeCodex(ctx context.Context, registrationID uint) (cod
 		unlock()
 		return codexoauth.Tokens{}, fmt.Errorf("读取邮箱失败: %w", err)
 	}
-	account := mailAccount(mailbox)
-	existingMessages, err := p.mail.ListMessages(ctx, account, 30)
+	account, accountErr := p.mailAccount(mailbox)
+	if accountErr != nil {
+		safeErr := codexSafeError(fmt.Errorf("读取邮箱配置失败: %w", accountErr), registration)
+		p.setCodexFailed(registration.ID, safeErr)
+		unlock()
+		return codexoauth.Tokens{}, safeErr
+	}
+	snapshotLimit := 30
+	if strings.EqualFold(strings.TrimSpace(account.Provider), domainmail.Provider) {
+		snapshotLimit = 2000
+	}
+	existingMessages, err := p.mail.ListMessages(ctx, account, snapshotLimit)
 	if err != nil {
 		safeErr := codexSafeError(fmt.Errorf("读取授权前邮件快照失败: %w", err), registration)
 		p.setCodexFailed(registration.ID, safeErr)

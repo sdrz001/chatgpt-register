@@ -2,11 +2,14 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"chatgpt-register/internal/domainmail"
 	"chatgpt-register/internal/emailalias"
+	"chatgpt-register/internal/integrationcfg"
 	"chatgpt-register/internal/mailfetch"
 	"chatgpt-register/internal/models"
 
@@ -36,11 +39,25 @@ func validMailboxStatus(s string) bool {
 	return s == "" || mailboxStatuses[s]
 }
 
-func mailboxAccount(mailbox models.Mailbox) mailfetch.Account {
-	return mailfetch.Account{
+func (h *Handler) mailboxAccount(mailbox models.Mailbox) (mailfetch.Account, error) {
+	account := mailfetch.Account{
 		Email: mailbox.Email, Provider: mailbox.Provider, ClientID: mailbox.ClientID,
-		RefreshToken: mailbox.RefreshToken, CodeURL: mailbox.CodeURL,
+		RefreshToken: mailbox.RefreshToken, CodeURL: mailbox.CodeURL, RemoteMailboxID: mailbox.RemoteMailboxID,
 	}
+	if !strings.EqualFold(strings.TrimSpace(mailbox.Provider), domainmail.Provider) {
+		return account, nil
+	}
+	values, err := integrationcfg.Load(h.DB)
+	if err != nil {
+		return account, fmt.Errorf("加载域名邮设置: %w", err)
+	}
+	config, err := values.DomainMail()
+	if err != nil {
+		return account, err
+	}
+	account.DomainMailBaseURL = config.Client.BaseURL
+	account.DomainMailAPIKey = config.Client.APIKey
+	return account, nil
 }
 
 func (h *Handler) MailboxOptions(c *gin.Context) {
@@ -96,6 +113,9 @@ func (h *Handler) MailboxList(c *gin.Context) {
 		items[i].CodeURLConfigured = strings.TrimSpace(items[i].CodeURL) != ""
 		items[i].RegisterCount = h.mailboxRegisterCount(items[i])
 		items[i].RegisterLimit = registerLimit
+		if strings.EqualFold(strings.TrimSpace(items[i].Provider), domainmail.Provider) {
+			items[i].RegisterLimit = 1
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"data": items, "total": total, "page": page, "size": size})
 }
@@ -142,6 +162,10 @@ func (h *Handler) MailboxCreate(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+	}
+	if strings.EqualFold(strings.TrimSpace(in.Provider), domainmail.Provider) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "域名邮必须通过 API 生成"})
+		return
 	}
 	m := models.Mailbox{
 		Email: strings.TrimSpace(in.Email), Password: in.Password, Provider: strings.TrimSpace(in.Provider),
@@ -228,12 +252,18 @@ func (h *Handler) MailboxVerify(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "邮箱不存在"})
 		return
 	}
-	err := h.Mail.Verify(c.Request.Context(), mailboxAccount(m))
-	if err != nil {
-		m.Status = "verify_failed"
-	} else {
-		m.Status = "verified"
+	account, accountErr := h.mailboxAccount(m)
+	if accountErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": accountErr.Error()})
+		return
 	}
+	if err := h.Mail.Verify(c.Request.Context(), account); err != nil {
+		m.Status = "verify_failed"
+		h.DB.Model(&m).Update("status", m.Status)
+		c.JSON(http.StatusOK, gin.H{"id": m.ID, "status": m.Status})
+		return
+	}
+	m.Status = "verified"
 	h.DB.Model(&m).Update("status", m.Status)
 	c.JSON(http.StatusOK, gin.H{"id": m.ID, "status": m.Status})
 }
@@ -257,9 +287,34 @@ func (h *Handler) MailboxUpdate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "邮箱分类不存在"})
 		return
 	}
+	if strings.EqualFold(strings.TrimSpace(m.Provider), domainmail.Provider) {
+		if !strings.EqualFold(strings.TrimSpace(in.Email), m.Email) || !strings.EqualFold(strings.TrimSpace(in.Provider), domainmail.Provider) || strings.TrimSpace(in.CodeURL) != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "域名邮地址和服务商由 API 管理"})
+			return
+		}
+		if in.Status != "" {
+			m.Status = in.Status
+		}
+		m.CategoryID = in.CategoryID
+		m.Note = in.Note
+		if err := h.DB.Save(&m).Error; err != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, m)
+		return
+	}
 	m.Email = strings.TrimSpace(in.Email)
 	m.Password = in.Password
-	m.Provider = strings.TrimSpace(in.Provider)
+	provider := strings.TrimSpace(in.Provider)
+	if strings.EqualFold(provider, domainmail.Provider) && m.RemoteMailboxID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "域名邮必须通过 API 生成"})
+		return
+	}
+	m.Provider = provider
+	if !strings.EqualFold(provider, domainmail.Provider) {
+		m.RemoteMailboxID = ""
+	}
 	m.ClientID = strings.TrimSpace(in.ClientID)
 	m.RefreshToken = strings.TrimSpace(in.RefreshToken)
 	if codeURL := strings.TrimSpace(in.CodeURL); codeURL != "" {
@@ -285,7 +340,28 @@ func (h *Handler) MailboxUpdate(c *gin.Context) {
 }
 
 func (h *Handler) MailboxDelete(c *gin.Context) {
-	if err := h.DB.Delete(&models.Mailbox{}, c.Param("id")).Error; err != nil {
+	var mailbox models.Mailbox
+	if err := h.DB.First(&mailbox, c.Param("id")).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "邮箱不存在"})
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(mailbox.Provider), domainmail.Provider) {
+		account, err := h.mailboxAccount(mailbox)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		client, err := domainmail.New(domainmail.Config{BaseURL: account.DomainMailBaseURL, APIKey: account.DomainMailAPIKey})
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := client.DeleteMailbox(c.Request.Context(), mailbox.RemoteMailboxID); err != nil && !errors.Is(err, domainmail.ErrNotFound) {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if err := h.DB.Delete(&mailbox).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -300,7 +376,15 @@ func (h *Handler) MailboxMessages(c *gin.Context) {
 		return
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	msgs, err := h.Mail.ListMessages(c.Request.Context(), mailboxAccount(m), limit)
+	account, err := h.mailboxAccount(m)
+	if err == nil {
+		var msgs []mailfetch.Message
+		msgs, err = h.Mail.ListMessages(c.Request.Context(), account, limit)
+		if err == nil {
+			c.JSON(http.StatusOK, gin.H{"email": m.Email, "items": msgs})
+			return
+		}
+	}
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, mailfetch.ErrMissingCreds) || errors.Is(err, mailfetch.ErrAuthFailed) {
@@ -309,7 +393,6 @@ func (h *Handler) MailboxMessages(c *gin.Context) {
 		c.JSON(status, gin.H{"error": err.Error(), "email": m.Email})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"email": m.Email, "items": msgs})
 }
 
 // MailboxMessage 按消息 ID 拉取单封邮件的完整正文，供点击后按需加载。
@@ -319,7 +402,11 @@ func (h *Handler) MailboxMessage(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "邮箱不存在"})
 		return
 	}
-	msg, err := h.Mail.GetMessage(c.Request.Context(), mailboxAccount(m), c.Query("mid"))
+	account, err := h.mailboxAccount(m)
+	var msg mailfetch.Message
+	if err == nil {
+		msg, err = h.Mail.GetMessage(c.Request.Context(), account, c.Query("mid"))
+	}
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, mailfetch.ErrMissingCreds) || errors.Is(err, mailfetch.ErrAuthFailed) {

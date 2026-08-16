@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>邮箱管理 · ChatGPT 注册管理</title>
-<link rel="stylesheet" href="/static/style.css?v=14">
+<link rel="stylesheet" href="/static/style.css?v=20">
 </head>
 <body data-page="mailboxes">
 <div class="layout">
@@ -29,7 +29,8 @@
         <option value="uncategorized">未分类</option>
       </select>
       <button class="px-btn" onclick="openMailboxCategoryModal()">分类管理</button>
-      <button class="px-btn primary" onclick="openImportModal()">批量导入邮箱</button>
+      <button id="domain-mail-generate-btn" class="px-btn primary" onclick="openDomainMailModal()" style="display:none">API 生成邮箱</button>
+      <button id="mailbox-import-btn" class="px-btn primary" onclick="openImportModal()">批量导入邮箱</button>
     </div>
     <div class="batch-bar" id="mb-batch" style="display:none">
       <span id="mb-batch-count">已选 0 项</span>
@@ -95,6 +96,32 @@
   </div>
 </div>
 
+<div class="modal-mask" id="domain-mail-modal" style="display:none">
+  <div class="modal px-panel" style="width:560px">
+    <h2>API 生成域名邮箱</h2>
+    <div class="import-sub">每个地址都是独立邮箱，生成后自动加入邮箱列表并标记为已验证。</div>
+    <label>生成数量</label><input id="domain-mail-count" class="px-input" type="number" min="1" max="100" value="10">
+    <label>邮箱名前缀</label><input id="domain-mail-prefix" class="px-input" maxlength="24" value="gpt" placeholder="例如 gpt；系统会追加随机后缀">
+    <label>邮箱域名</label><input id="domain-mail-domain" class="px-input" readonly>
+    <label>有效期</label>
+    <select id="domain-mail-expiry" class="px-input">
+      <option value="3600000">1 小时</option>
+      <option value="86400000">1 天</option>
+      <option value="604800000">7 天</option>
+      <option value="0">永久</option>
+    </select>
+    <label>分类</label>
+    <select id="domain-mail-category" class="px-input">
+      <option value="">未分类</option>
+    </select>
+    <div id="domain-mail-generate-result" class="proxy-result" style="display:none"></div>
+    <div class="modal-actions">
+      <button class="px-btn" onclick="closeModal('domain-mail-modal')">取消</button>
+      <button id="domain-mail-submit-btn" class="px-btn primary" onclick="generateDomainMailboxes()">开始生成</button>
+    </div>
+  </div>
+</div>
+
 <!-- 批量导入 modal -->
 <div class="modal-mask" id="import-modal" style="display:none">
   <div class="modal px-panel" style="width:620px">
@@ -136,6 +163,6 @@
 
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js"></script>
-<script src="/static/mailboxes.js?v=10"></script>
+<script src="/static/mailboxes.js?v=11"></script>
 </body>
 </html>

@@ -3,6 +3,7 @@ let mbPage = 1;
 const size = 20;
 let mbCache = {};
 let mailboxCategories = [];
+let domainMailSettings = null;
 
 const MB_STATUS = {
   unverified: '待验证',
@@ -34,7 +35,7 @@ async function loadMailboxes() {
     document.getElementById('mb-rows').innerHTML = (d.data || []).map(x => `
       <tr class="${mbSelected.has(x.id) ? 'row-sel' : ''}">
         <td class="col-check"><input type="checkbox" ${mbSelected.has(x.id) ? 'checked' : ''} onclick="toggleSelect(${x.id}, this.checked)"></td>
-        <td>${esc(x.email)}</td>
+        <td><div>${esc(x.email)}</div>${x.provider === 'domain_api' ? '<span class="table-muted">域名邮 API</span>' : ''}</td>
         <td>${x.category ? `<span class="category-chip">${esc(x.category.name)}</span>` : '<span class="table-muted">未分类</span>'}</td>
         <td>${Number(x.register_count || 0)} / ${Number(x.register_limit || 0)}</td>
         <td>${fmtTime(x.created_at)}</td>
@@ -67,6 +68,7 @@ async function loadMailboxCategories() {
   rebuildMailboxCategorySelect('mb-category-filter', '全部分类', true);
   rebuildMailboxCategorySelect('batch-mailbox-category', '批量归类', true);
   rebuildMailboxCategorySelect('mb-category', '未分类', false);
+  rebuildMailboxCategorySelect('domain-mail-category', '未分类', false);
   renderMailboxCategories();
 }
 
@@ -192,12 +194,83 @@ async function delSelected() {
   const ids = [...mbSelected];
   if (!ids.length) return;
   if (!confirm('确定删除所选 ' + ids.length + ' 个邮箱?')) return;
+  let deleted = 0;
+  let failed = 0;
   for (const id of ids) {
-    await api('/api/mailboxes/' + id, { method: 'DELETE' });
-    mbSelected.delete(id);
+    const response = await api('/api/mailboxes/' + id, { method: 'DELETE' });
+    if (response.ok) {
+      mbSelected.delete(id);
+      deleted++;
+    } else {
+      failed++;
+    }
   }
-  toast('已删除 ' + ids.length + ' 个');
+  toast(failed ? `已删除 ${deleted} 个，失败 ${failed} 个` : '已删除 ' + deleted + ' 个', failed > 0);
   loadMailboxes();
+}
+
+async function loadMailboxSourceSettings() {
+  const r = await api('/api/settings');
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return;
+  domainMailSettings = d;
+  const enabled = d.mailbox_source === 'domain_api';
+  document.getElementById('domain-mail-generate-btn').style.display = enabled ? '' : 'none';
+  document.getElementById('mailbox-import-btn').className = enabled ? 'px-btn' : 'px-btn primary';
+}
+
+function openDomainMailModal() {
+  if (!domainMailSettings || domainMailSettings.mailbox_source !== 'domain_api') {
+    return toast('请先在系统设置中选择并配置域名邮 API', true);
+  }
+  if (!domainMailSettings.domain_mail_domain) return toast('请先在系统设置中选择邮箱域名', true);
+  document.getElementById('domain-mail-domain').value = domainMailSettings.domain_mail_domain;
+  document.getElementById('domain-mail-expiry').value = domainMailSettings.domain_mail_expiry_time || '3600000';
+  document.getElementById('domain-mail-category').value = '';
+  syncSelect('domain-mail-expiry');
+  syncSelect('domain-mail-category');
+  document.getElementById('domain-mail-generate-result').style.display = 'none';
+  document.getElementById('domain-mail-modal').style.display = 'flex';
+}
+
+async function generateDomainMailboxes() {
+  const count = Number.parseInt(document.getElementById('domain-mail-count').value, 10);
+  if (!Number.isInteger(count) || count < 1 || count > 100) return toast('生成数量必须在 1 到 100 之间', true);
+  const button = document.getElementById('domain-mail-submit-btn');
+  const result = document.getElementById('domain-mail-generate-result');
+  button.disabled = true;
+  result.style.display = 'flex';
+  result.className = 'proxy-result testing';
+  result.innerHTML = '<span class="spinner"></span> 正在逐个生成邮箱…';
+  try {
+    const category = document.getElementById('domain-mail-category').value;
+    const r = await api('/api/mailboxes/generate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        count,
+        name_prefix: document.getElementById('domain-mail-prefix').value.trim(),
+        domain: document.getElementById('domain-mail-domain').value,
+        expiry_time: Number(document.getElementById('domain-mail-expiry').value),
+        category_id: category ? Number(category) : null,
+      }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok && !d.added) {
+      result.className = 'proxy-result fail';
+      result.textContent = d.error || ((d.items || [])[0]?.error) || '生成失败';
+      return;
+    }
+    const added = Number(d.added || 0);
+    const failed = Number(d.failed || 0);
+    result.className = failed ? 'proxy-result fail' : 'proxy-result ok';
+    result.textContent = '生成完成：成功 ' + added + '，失败 ' + failed;
+    toast('域名邮已新增 ' + added + ' 个' + (failed ? '，失败 ' + failed + ' 个' : ''), failed > 0);
+    mbPage = 1;
+    loadMailboxes();
+    loadMailboxCategories();
+  } finally {
+    button.disabled = false;
+  }
 }
 
 /* ===== 批量导入 ===== */
@@ -338,6 +411,14 @@ function openMailboxModal(data) {
   document.getElementById('mb-status').value = data ? data.status : 'unverified';
   syncSelect('mb-status');
   document.getElementById('mb-note').value = data ? data.note : '';
+  const managed = Boolean(data && data.provider === 'domain_api');
+  ['mb-email', 'mb-password', 'mb-provider', 'mb-client-id', 'mb-refresh-token', 'mb-code-url'].forEach(id => {
+    document.getElementById(id).disabled = managed;
+  });
+  if (managed) {
+    codeURL.placeholder = '由域名邮 API 管理';
+    document.getElementById('mb-modal-title').textContent = '编辑域名邮 #' + data.id;
+  }
   document.getElementById('mb-modal').style.display = 'flex';
 }
 
@@ -565,4 +646,5 @@ document.getElementById('mail-modal').addEventListener('click', e => {
 });
 
 loadMailboxCategories();
+loadMailboxSourceSettings();
 loadMailboxes();

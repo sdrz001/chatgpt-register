@@ -14,10 +14,13 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"chatgpt-register/internal/domainmail"
 )
 
 const (
@@ -44,11 +47,14 @@ var (
 
 // Account 一条邮箱凭据。
 type Account struct {
-	Email        string
-	Provider     string
-	ClientID     string
-	RefreshToken string
-	CodeURL      string
+	Email             string
+	Provider          string
+	ClientID          string
+	RefreshToken      string
+	CodeURL           string
+	RemoteMailboxID   string
+	DomainMailBaseURL string
+	DomainMailAPIKey  string
 }
 
 // Message 一封邮件。列表接口只返回头部（ID/发件人/主题/时间），正文按需单独拉取。
@@ -106,6 +112,10 @@ func ValidateCodeURL(rawURL string) error {
 // Verify 校验一条邮箱凭据是否可用：尝试用 refresh_token 换取 access_token。
 // 批量并发验证时微软 token 端点会偶发限流/瞬时错误，这里带指数退避重试，避免误判为失败。
 func (c *Client) Verify(ctx context.Context, acc Account) error {
+	if isDomainMail(acc) {
+		_, err := c.listDomainMessages(ctx, acc, 1)
+		return err
+	}
 	if strings.TrimSpace(acc.CodeURL) != "" {
 		_, err := c.fetchCodeAPI(ctx, acc)
 		if errors.Is(err, ErrCodeNotFound) {
@@ -136,6 +146,9 @@ func (c *Client) Verify(ctx context.Context, acc Account) error {
 // ListMessages 拉 Inbox + JunkEmail 最新邮件的头部（不含正文），两个文件夹并发拉取，按时间倒序合并返回。
 // 正文由 GetMessage 按需单独拉取，避免每次列表都传输大量 HTML 拖慢速度。
 func (c *Client) ListMessages(ctx context.Context, acc Account, limit int) ([]Message, error) {
+	if isDomainMail(acc) {
+		return c.listDomainMessages(ctx, acc, limit)
+	}
 	if strings.TrimSpace(acc.CodeURL) != "" {
 		message, err := c.fetchCodeAPI(ctx, acc)
 		if errors.Is(err, ErrCodeNotFound) {
@@ -184,6 +197,9 @@ func (c *Client) ListMessages(ctx context.Context, acc Account, limit int) ([]Me
 }
 
 func (c *Client) SearchMessages(ctx context.Context, acc Account, query string, limit int) ([]Message, error) {
+	if isDomainMail(acc) {
+		return c.listDomainMessages(ctx, acc, limit)
+	}
 	if strings.TrimSpace(acc.CodeURL) != "" {
 		message, err := c.GetCodeURLArchive(ctx, acc, limit)
 		if err != nil {
@@ -246,6 +262,17 @@ func messagesFromGraph(messages []graphMessage, limit int) []Message {
 
 // GetMessage 按消息 ID 拉取单封邮件的完整正文（HTML + 纯文本）。
 func (c *Client) GetMessage(ctx context.Context, acc Account, msgID string) (Message, error) {
+	if isDomainMail(acc) {
+		client, err := c.domainMailClient(acc)
+		if err != nil {
+			return Message{}, err
+		}
+		message, err := client.GetMessage(ctx, acc.RemoteMailboxID, msgID)
+		if err != nil {
+			return Message{}, err
+		}
+		return messageFromDomain(message), nil
+	}
 	if strings.TrimSpace(acc.CodeURL) != "" {
 		message, err := c.fetchCodeAPI(ctx, acc)
 		if err != nil {
@@ -304,6 +331,68 @@ func (c *Client) GetMessage(ctx context.Context, acc Account, msgID string) (Mes
 		HTML:       html,
 		Text:       text,
 	}, nil
+}
+
+func isDomainMail(acc Account) bool {
+	return strings.EqualFold(strings.TrimSpace(acc.Provider), domainmail.Provider)
+}
+
+func (c *Client) domainMailClient(acc Account) (*domainmail.Client, error) {
+	return domainmail.New(domainmail.Config{
+		BaseURL: strings.TrimSpace(acc.DomainMailBaseURL),
+		APIKey:  strings.TrimSpace(acc.DomainMailAPIKey),
+		Timeout: c.http.Timeout,
+	}, domainmail.WithHTTPClient(c.http))
+}
+
+func (c *Client) listDomainMessages(ctx context.Context, acc Account, limit int) ([]Message, error) {
+	if limit < 1 {
+		limit = 20
+	}
+	client, err := c.domainMailClient(acc)
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]Message, 0, limit)
+	cursor := ""
+	seenCursors := map[string]struct{}{}
+	seenMessages := map[string]struct{}{}
+	for pageNumber := 0; pageNumber < 100; pageNumber++ {
+		page, err := client.ListMessages(ctx, acc.RemoteMailboxID, cursor)
+		if err != nil {
+			return nil, err
+		}
+		for _, message := range page.Items {
+			if _, exists := seenMessages[message.ID]; exists {
+				continue
+			}
+			seenMessages[message.ID] = struct{}{}
+			messages = append(messages, messageFromDomain(message))
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		if _, exists := seenCursors[page.NextCursor]; exists {
+			break
+		}
+		seenCursors[page.NextCursor] = struct{}{}
+		cursor = page.NextCursor
+	}
+	sort.SliceStable(messages, func(i, j int) bool {
+		return messages[i].ReceivedAt.After(messages[j].ReceivedAt)
+	})
+	if len(messages) > limit {
+		messages = messages[:limit]
+	}
+	return messages, nil
+}
+
+func messageFromDomain(message domainmail.Message) Message {
+	text := strings.TrimSpace(message.Text + " " + stripHTML(message.HTML))
+	return Message{
+		ID: message.ID, From: message.From, FromName: message.FromName,
+		Subject: message.Subject, ReceivedAt: message.ReceivedAt, HTML: message.HTML, Text: text,
+	}
 }
 
 func (c *Client) GetCodeURLArchive(ctx context.Context, acc Account, limit int) (Message, error) {

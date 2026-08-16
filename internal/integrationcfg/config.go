@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"chatgpt-register/internal/domainmail"
 	"chatgpt-register/internal/models"
 	"chatgpt-register/internal/smsactivate"
 	"chatgpt-register/internal/sub2api"
@@ -34,6 +35,13 @@ type SMSConfig struct {
 	MaxPhoneAttempts int
 }
 
+type DomainMailConfig struct {
+	Source     string
+	Client     domainmail.Config
+	Domain     string
+	ExpiryTime int64
+}
+
 func Load(db *gorm.DB) (Values, error) {
 	var settings []models.Setting
 	if err := db.Find(&settings).Error; err != nil {
@@ -52,6 +60,52 @@ func (v Values) CodexAutoAuthorize() bool {
 
 func (v Values) Sub2APIAutoImport() bool {
 	return strings.TrimSpace(v["sub2api_auto_import"]) == "1"
+}
+
+func (v Values) DomainMail() (DomainMailConfig, error) {
+	source := strings.TrimSpace(v["mailbox_source"])
+	if source == "" {
+		source = "import"
+	}
+	if source != "import" && source != domainmail.Provider {
+		return DomainMailConfig{}, fmt.Errorf("邮箱来源必须是 import 或 %s", domainmail.Provider)
+	}
+	expiryTime := int64(3600000)
+	if value := strings.TrimSpace(v["domain_mail_expiry_time"]); value != "" {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return DomainMailConfig{}, fmt.Errorf("域名邮有效期必须是整数毫秒")
+		}
+		expiryTime = parsed
+	}
+	if !domainmail.ValidExpiryTime(expiryTime) {
+		return DomainMailConfig{}, fmt.Errorf("域名邮有效期不在允许范围")
+	}
+	config := DomainMailConfig{
+		Source: source,
+		Client: domainmail.Config{
+			BaseURL: strings.TrimSpace(v["domain_mail_url"]),
+			APIKey:  strings.TrimSpace(v["domain_mail_api_key"]),
+			Timeout: 15 * time.Second,
+		},
+		Domain:     strings.ToLower(strings.TrimSpace(strings.TrimPrefix(v["domain_mail_domain"], "@"))),
+		ExpiryTime: expiryTime,
+	}
+	if config.Client.BaseURL == "" {
+		config.Client.BaseURL = domainmail.DefaultBaseURL
+	}
+	if source == domainmail.Provider {
+		if config.Client.APIKey == "" {
+			return DomainMailConfig{}, fmt.Errorf("域名邮 API Key 为空")
+		}
+		if config.Domain == "" || strings.ContainsAny(config.Domain, " /@") {
+			return DomainMailConfig{}, fmt.Errorf("域名邮域名无效")
+		}
+		if _, err := domainmail.New(config.Client); err != nil {
+			return DomainMailConfig{}, err
+		}
+	}
+	return config, nil
 }
 
 func (v Values) SMS() (SMSConfig, error) {

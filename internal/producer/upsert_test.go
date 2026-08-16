@@ -23,6 +23,54 @@ func TestMailAccountIncludesCodeURL(t *testing.T) {
 	}
 }
 
+func TestMailAccountLoadsDomainMailSettings(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Setting{}); err != nil {
+		t.Fatal(err)
+	}
+	settings := []models.Setting{
+		{Key: "mailbox_source", Value: "domain_api"},
+		{Key: "domain_mail_url", Value: "https://mail.example.test"},
+		{Key: "domain_mail_api_key", Value: "secret"},
+		{Key: "domain_mail_domain", Value: "moemail.app"},
+	}
+	if err := database.Create(&settings).Error; err != nil {
+		t.Fatal(err)
+	}
+	mailbox := models.Mailbox{Email: "generated@moemail.app", Provider: "domain_api", RemoteMailboxID: "remote-1"}
+	account, err := (&Producer{db: database}).mailAccount(mailbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.RemoteMailboxID != "remote-1" || account.DomainMailBaseURL != "https://mail.example.test" || account.DomainMailAPIKey != "secret" {
+		t.Fatalf("account=%+v", account)
+	}
+}
+
+func TestDomainMailMailboxNeverClaimsFissionJob(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Mailbox{}, &models.Registration{}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox := models.Mailbox{Email: "generated@moemail.app", Provider: "domain_api", RemoteMailboxID: "remote-1", Status: "verified"}
+	if err := database.Create(&mailbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&models.Registration{Email: mailbox.Email, MailboxID: mailbox.ID, Status: "registered"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	producer := &Producer{db: database, inflight: map[string]uint{}, attempts: map[string]registrationAttempt{}}
+	if _, email, _, ok := producer.nextJob(Config{FissionCount: 10}, Scope{}); ok || email != "" {
+		t.Fatalf("unexpected domain mail fission email=%q ok=%v", email, ok)
+	}
+}
+
 func TestLoadConfigDefaultsBrowserBackendToRod(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
