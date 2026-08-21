@@ -71,6 +71,27 @@ func TestDomainMailMailboxNeverClaimsFissionJob(t *testing.T) {
 	}
 }
 
+func TestRegistrationPasswordReusesExistingPassword(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Registration{}); err != nil {
+		t.Fatal(err)
+	}
+	registration := models.Registration{Email: "retry@example.test", Password: "existing-password", Status: "register_failed"}
+	if err := database.Create(&registration).Error; err != nil {
+		t.Fatal(err)
+	}
+	producer := &Producer{db: database}
+	if password := producer.registrationPassword(registration.Email); password != registration.Password {
+		t.Fatalf("password=%q", password)
+	}
+	if password := producer.registrationPassword("new@example.test"); password == "" || password == registration.Password {
+		t.Fatalf("generated password=%q", password)
+	}
+}
+
 func TestLoadConfigDefaultsBrowserBackendToRod(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -80,7 +101,7 @@ func TestLoadConfigDefaultsBrowserBackendToRod(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := (&Producer{db: database}).loadConfig()
-	if config.BrowserBackend != "rod" || config.PythonExecutable != "" {
+	if config.BrowserBackend != "rod" || config.RegistrationFlow != "email_code" || config.PythonExecutable != "" {
 		t.Fatalf("config=%+v", config)
 	}
 }
@@ -95,13 +116,14 @@ func TestLoadConfigReadsCloakBrowserSettings(t *testing.T) {
 	}
 	settings := []models.Setting{
 		{Key: "browser_backend", Value: "cloakbrowser"},
+		{Key: "registration_flow", Value: "password"},
 		{Key: "python_executable", Value: `C:\Python\python.exe`},
 	}
 	if err := database.Create(&settings).Error; err != nil {
 		t.Fatal(err)
 	}
 	config := (&Producer{db: database}).loadConfig()
-	if config.BrowserBackend != "cloakbrowser" || config.PythonExecutable != `C:\Python\python.exe` {
+	if config.BrowserBackend != "cloakbrowser" || config.RegistrationFlow != "password" || config.PythonExecutable != `C:\Python\python.exe` {
 		t.Fatalf("config=%+v", config)
 	}
 }

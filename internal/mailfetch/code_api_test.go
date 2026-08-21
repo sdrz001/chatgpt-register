@@ -110,6 +110,45 @@ func TestCodeURLArchiveReturnsHistoricalMailBody(t *testing.T) {
 	}
 }
 
+func TestCodeAPIReadsCodeFromSameOriginIframe(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/mailbox/token":
+			fmt.Fprint(w, `<html><body><iframe src="/mailbox/token/content"></iframe></body></html>`)
+		case "/mailbox/token/content":
+			fmt.Fprint(w, `<html><body><p>Enter this temporary verification code to continue:</p><strong>441211</strong></body></html>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(WithHTTPClient(server.Client()))
+	messages, err := client.ListMessages(context.Background(), Account{CodeURL: server.URL + "/mailbox/token"}, 20)
+	if err != nil || len(messages) != 1 || messages[0].Text != "441211" {
+		t.Fatalf("messages=%v error=%v", messages, err)
+	}
+}
+
+func TestCodeAPIDoesNotFollowCrossOriginIframe(t *testing.T) {
+	foreignCalled := false
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		foreignCalled = true
+		fmt.Fprint(w, "441211")
+	}))
+	defer foreign.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `<html><body><iframe src="%s/content"></iframe></body></html>`, foreign.URL)
+	}))
+	defer server.Close()
+
+	client := New(WithHTTPClient(server.Client()))
+	messages, err := client.ListMessages(context.Background(), Account{CodeURL: server.URL + "/mailbox/token"}, 20)
+	if err != nil || len(messages) != 0 || foreignCalled {
+		t.Fatalf("messages=%v error=%v foreign_called=%v", messages, err, foreignCalled)
+	}
+}
+
 func TestCodeAPINoCodeAndErrors(t *testing.T) {
 	status := http.StatusOK
 	body := `{"message":"waiting"}`

@@ -10,10 +10,13 @@ import (
 	"chatgpt-register/internal/domainmail"
 	"chatgpt-register/internal/emailalias"
 	"chatgpt-register/internal/integrationcfg"
+	"chatgpt-register/internal/mailcom"
 	"chatgpt-register/internal/mailfetch"
 	"chatgpt-register/internal/models"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type mailboxInput struct {
@@ -39,12 +42,50 @@ func validMailboxStatus(s string) bool {
 	return s == "" || mailboxStatuses[s]
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func validateMailComInput(provider, email, password, codeURL string) error {
+	if !strings.EqualFold(strings.TrimSpace(provider), mailcom.Provider) {
+		return nil
+	}
+	if strings.TrimSpace(password) == "" {
+		return fmt.Errorf("mail.com 邮箱密码不能为空")
+	}
+	if strings.TrimSpace(codeURL) != "" {
+		return fmt.Errorf("mail.com 不能同时配置取码 API 地址")
+	}
+	if !mailcom.IsAddress(email) {
+		return fmt.Errorf("该地址不属于已知的 mail.com 邮箱域名")
+	}
+	return nil
+}
+
 func (h *Handler) mailboxAccount(mailbox models.Mailbox) (mailfetch.Account, error) {
 	account := mailfetch.Account{
-		Email: mailbox.Email, Provider: mailbox.Provider, ClientID: mailbox.ClientID,
+		Email: mailbox.Email, Password: mailbox.Password, Provider: mailbox.Provider, ClientID: mailbox.ClientID,
 		RefreshToken: mailbox.RefreshToken, CodeURL: mailbox.CodeURL, RemoteMailboxID: mailbox.RemoteMailboxID,
 	}
-	if !strings.EqualFold(strings.TrimSpace(mailbox.Provider), domainmail.Provider) {
+	provider := strings.TrimSpace(mailbox.Provider)
+	if strings.EqualFold(provider, mailcom.Provider) {
+		values, err := integrationcfg.Load(h.DB)
+		if err != nil {
+			return account, fmt.Errorf("加载 mail.com 设置: %w", err)
+		}
+		config, err := values.MailCom()
+		if err != nil {
+			return account, err
+		}
+		account.MailComOAuthPublicSecret = config.OAuthPublicSecret
+		return account, nil
+	}
+	if !strings.EqualFold(provider, domainmail.Provider) {
 		return account, nil
 	}
 	values, err := integrationcfg.Load(h.DB)
@@ -70,6 +111,13 @@ func (h *Handler) MailboxOptions(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+func setMailboxCredentialFlags(mailbox *models.Mailbox) {
+	mailbox.PasswordConfigured = strings.TrimSpace(mailbox.Password) != ""
+	mailbox.ClientIDConfigured = strings.TrimSpace(mailbox.ClientID) != ""
+	mailbox.RefreshTokenConfigured = strings.TrimSpace(mailbox.RefreshToken) != ""
+	mailbox.CodeURLConfigured = strings.TrimSpace(mailbox.CodeURL) != ""
 }
 
 func (h *Handler) MailboxList(c *gin.Context) {
@@ -110,7 +158,7 @@ func (h *Handler) MailboxList(c *gin.Context) {
 	}
 	registerLimit := 1 + h.fissionCount()
 	for i := range items {
-		items[i].CodeURLConfigured = strings.TrimSpace(items[i].CodeURL) != ""
+		setMailboxCredentialFlags(&items[i])
 		items[i].RegisterCount = h.mailboxRegisterCount(items[i])
 		items[i].RegisterLimit = registerLimit
 		if strings.EqualFold(strings.TrimSpace(items[i].Provider), domainmail.Provider) {
@@ -163,12 +211,20 @@ func (h *Handler) MailboxCreate(c *gin.Context) {
 			return
 		}
 	}
+	if err := validateMailComInput(in.Provider, in.Email, in.Password, codeURL); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	if strings.EqualFold(strings.TrimSpace(in.Provider), domainmail.Provider) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "域名邮必须通过 API 生成"})
 		return
 	}
+	provider := strings.TrimSpace(in.Provider)
+	if strings.EqualFold(provider, mailcom.Provider) {
+		provider = mailcom.Provider
+	}
 	m := models.Mailbox{
-		Email: strings.TrimSpace(in.Email), Password: in.Password, Provider: strings.TrimSpace(in.Provider),
+		Email: strings.TrimSpace(in.Email), Password: in.Password, Provider: provider,
 		ClientID: strings.TrimSpace(in.ClientID), RefreshToken: strings.TrimSpace(in.RefreshToken), CodeURL: codeURL,
 		Status: in.Status, CategoryID: in.CategoryID, Note: in.Note,
 	}
@@ -186,13 +242,14 @@ func (h *Handler) MailboxCreate(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
 	}
-	m.CodeURLConfigured = m.CodeURL != ""
+	setMailboxCredentialFlags(&m)
 	c.JSON(http.StatusCreated, m)
 }
 
 type mailboxImportItem struct {
 	Email        string `json:"email"`
 	Password     string `json:"password"`
+	Provider     string `json:"provider"`
 	ClientID     string `json:"client_id"`
 	RefreshToken string `json:"refresh_token"`
 	CodeURL      string `json:"code_url"`
@@ -201,48 +258,100 @@ type mailboxImportItem struct {
 // MailboxImport 批量导入邮箱，重复 email 自动跳过。
 func (h *Handler) MailboxImport(c *gin.Context) {
 	var in struct {
-		Items []mailboxImportItem `json:"items" binding:"required"`
+		Items      []mailboxImportItem `json:"items" binding:"required"`
+		CategoryID *uint               `json:"category_id"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	added, skipped := 0, 0
+	if !h.categoryExists("mailbox", in.CategoryID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "邮箱分类不存在或作用域不匹配"})
+		return
+	}
+
+	added, duplicates, invalid := 0, 0, 0
 	seen := map[string]bool{}
+	candidates := make([]models.Mailbox, 0, len(in.Items))
+	candidateKeys := make([]string, 0, len(in.Items))
 	for _, it := range in.Items {
 		email := strings.TrimSpace(it.Email)
-		if email == "" || !strings.Contains(email, "@") || seen[email] {
-			skipped++
+		key := strings.ToLower(email)
+		if email == "" || !strings.Contains(email, "@") {
+			invalid++
 			continue
 		}
-		seen[email] = true
-		var count int64
-		h.DB.Model(&models.Mailbox{}).Where("email = ?", email).Count(&count)
-		if count > 0 {
-			skipped++
+		if seen[key] {
+			duplicates++
 			continue
+		}
+		seen[key] = true
+		provider := strings.TrimSpace(it.Provider)
+		if provider == "" && strings.TrimSpace(it.Password) != "" && strings.TrimSpace(it.ClientID) == "" && strings.TrimSpace(it.RefreshToken) == "" && mailcom.IsAddress(email) {
+			provider = mailcom.Provider
 		}
 		codeURL := strings.TrimSpace(it.CodeURL)
 		if codeURL != "" && mailfetch.ValidateCodeURL(codeURL) != nil {
-			skipped++
+			invalid++
+			continue
+		}
+		if validateMailComInput(provider, email, it.Password, codeURL) != nil {
+			invalid++
 			continue
 		}
 		m := models.Mailbox{
-			Email: email, Password: strings.TrimSpace(it.Password), ClientID: strings.TrimSpace(it.ClientID),
-			RefreshToken: strings.TrimSpace(it.RefreshToken), CodeURL: codeURL, Status: "verifying",
+			Email: email, Password: strings.TrimSpace(it.Password), Provider: provider,
+			ClientID: strings.TrimSpace(it.ClientID), RefreshToken: strings.TrimSpace(it.RefreshToken), CodeURL: codeURL,
+			Status: "verifying", CategoryID: in.CategoryID,
+		}
+		if strings.EqualFold(m.Provider, "mailcom") {
+			m.Provider = mailcom.Provider
 		}
 		if codeURL != "" {
 			m.Provider = "api"
 			m.Status = "verified"
 			m.Password, m.ClientID, m.RefreshToken = "", "", ""
 		}
-		if err := h.DB.Create(&m).Error; err != nil {
-			skipped++
-			continue
-		}
-		added++
+		candidates = append(candidates, m)
+		candidateKeys = append(candidateKeys, key)
 	}
-	c.JSON(http.StatusOK, gin.H{"added": added, "skipped": skipped})
+	if len(candidates) > 0 {
+		existing := make([]string, 0)
+		if err := h.DB.Model(&models.Mailbox{}).Where("LOWER(email) IN ?", candidateKeys).Pluck("email", &existing).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "批量导入失败", "detail": err.Error()})
+			return
+		}
+		existingKeys := make(map[string]struct{}, len(existing))
+		for _, email := range existing {
+			existingKeys[strings.ToLower(email)] = struct{}{}
+		}
+		pending := candidates[:0]
+		for _, candidate := range candidates {
+			if _, exists := existingKeys[strings.ToLower(candidate.Email)]; exists {
+				duplicates++
+				continue
+			}
+			pending = append(pending, candidate)
+		}
+		candidates = pending
+	}
+	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if len(candidates) == 0 {
+			return nil
+		}
+		result := tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(&candidates, 100)
+		if result.Error != nil {
+			return result.Error
+		}
+		added = int(result.RowsAffected)
+		duplicates += len(candidates) - added
+		return nil
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "批量导入失败", "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"added": added, "skipped": duplicates + invalid, "duplicates": duplicates, "invalid": invalid})
 }
 
 // MailboxVerify 校验单个邮箱凭据是否可用，更新状态为 verified / verify_failed。
@@ -301,23 +410,53 @@ func (h *Handler) MailboxUpdate(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
+		setMailboxCredentialFlags(&m)
 		c.JSON(http.StatusOK, m)
 		return
 	}
+	oldProvider := strings.TrimSpace(m.Provider)
 	m.Email = strings.TrimSpace(in.Email)
-	m.Password = in.Password
 	provider := strings.TrimSpace(in.Provider)
+	mailComProvider := strings.EqualFold(provider, mailcom.Provider)
+	if mailComProvider {
+		provider = mailcom.Provider
+	}
+	providerChanged := !strings.EqualFold(oldProvider, provider)
+	effectivePassword := strings.TrimSpace(in.Password)
+	if effectivePassword == "" && !providerChanged {
+		effectivePassword = strings.TrimSpace(m.Password)
+	}
+	codeURL := strings.TrimSpace(in.CodeURL)
+	if err := validateMailComInput(provider, m.Email, effectivePassword, codeURL); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	if strings.EqualFold(provider, domainmail.Provider) && m.RemoteMailboxID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "域名邮必须通过 API 生成"})
 		return
 	}
 	m.Provider = provider
+	if providerChanged {
+		m.Password, m.ClientID, m.RefreshToken, m.CodeURL = "", "", "", ""
+	}
+	if strings.TrimSpace(in.Password) != "" {
+		m.Password = in.Password
+	}
+	if strings.TrimSpace(in.ClientID) != "" {
+		m.ClientID = strings.TrimSpace(in.ClientID)
+	}
+	if strings.TrimSpace(in.RefreshToken) != "" {
+		m.RefreshToken = strings.TrimSpace(in.RefreshToken)
+	}
 	if !strings.EqualFold(provider, domainmail.Provider) {
 		m.RemoteMailboxID = ""
 	}
-	m.ClientID = strings.TrimSpace(in.ClientID)
-	m.RefreshToken = strings.TrimSpace(in.RefreshToken)
-	if codeURL := strings.TrimSpace(in.CodeURL); codeURL != "" {
+	if mailComProvider {
+		m.CodeURL = ""
+		m.ClientID = ""
+		m.RefreshToken = ""
+	}
+	if codeURL != "" {
 		if err := mailfetch.ValidateCodeURL(codeURL); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -335,7 +474,7 @@ func (h *Handler) MailboxUpdate(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
 	}
-	m.CodeURLConfigured = m.CodeURL != ""
+	setMailboxCredentialFlags(&m)
 	c.JSON(http.StatusOK, m)
 }
 
@@ -375,6 +514,7 @@ func (h *Handler) MailboxMessages(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "邮箱不存在"})
 		return
 	}
+	setMailboxCredentialFlags(&m)
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 	account, err := h.mailboxAccount(m)
 	if err == nil {

@@ -133,14 +133,31 @@ func TestSettingsDefaultBrowserBackendIsRod(t *testing.T) {
 	}
 }
 
+func TestSettingsDefaultRegistrationFlowIsEmailCode(t *testing.T) {
+	_, router := settingsTestHandler(t)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/settings", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["registration_flow"] != "email_code" {
+		t.Fatalf("registration_flow=%q", body["registration_flow"])
+	}
+}
+
 func TestSettingsSaveBrowserBackend(t *testing.T) {
 	handler, router := settingsTestHandler(t)
-	response := putSettings(router, `{"browser_backend":"cloakbrowser","python_executable":"C:\\Python\\python.exe"}`)
+	response := putSettings(router, `{"browser_backend":"cloakbrowser","registration_flow":"password","python_executable":"C:\\Python\\python.exe"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	for key, want := range map[string]string{
 		"browser_backend":   "cloakbrowser",
+		"registration_flow": "password",
 		"python_executable": `C:\Python\python.exe`,
 	} {
 		var setting models.Setting
@@ -157,6 +174,18 @@ func TestSettingsRejectInvalidBrowserBackendAtomically(t *testing.T) {
 	handler, router := settingsTestHandler(t)
 	response := putSettings(router, `{"max_concurrency":"20","browser_backend":"other"}`)
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "browser_backend") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var count int64
+	if err := handler.DB.Model(&models.Setting{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("partial settings persisted: count=%d error=%v", count, err)
+	}
+}
+
+func TestSettingsRejectInvalidRegistrationFlowAtomically(t *testing.T) {
+	handler, router := settingsTestHandler(t)
+	response := putSettings(router, `{"max_concurrency":"20","registration_flow":"other"}`)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "registration_flow") {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	var count int64

@@ -7,11 +7,12 @@ import re
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Awaitable, Callable, Mapping, Optional
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 EMAIL = "#email,input[name='email'],input[type='email'],input[autocomplete='email']"
 PASSWORD = "input[type='password'],input[name='password'],input[autocomplete='new-password'],input[autocomplete='current-password']"
 CODE = "input[name='code'],input[autocomplete='one-time-code'],input[inputmode='numeric'][maxlength='6']"
+PASSWORD_SIGNUP = "a[href='/create-account/password'],a[href$='/create-account/password']"
 NAME = "input[name='name'],input[name='fullName'],input[name='full_name'],input[id='name'],input[id='fullName'],input[id='full-name'],input[autocomplete='name'],input[placeholder='Full name'],input[placeholder='Name'],input[placeholder='Nome completo'],input[placeholder='Nome'],input[placeholder='全名'],input[placeholder='姓名'],input[aria-label='Full name'],input[aria-label='Name'],input[aria-label='Nome completo'],input[aria-label='Nome'],input[aria-label='全名'],input[aria-label='姓名']"
 PROFILE = "input[name='age'],input[name='birthdate'],input[name='birthday'],input[name='date_of_birth'],input[name='dob'],input[id='age'],input[id*='birth'],input[id*='nascimento'],input[autocomplete='bday'],input[type='date'],input[placeholder='Age'],input[placeholder='Idade'],input[placeholder='Data de nascimento'],input[aria-label='Idade'],input[aria-label='Data de nascimento'],input[placeholder='DD/MM/AAAA'],input[aria-label='DD/MM/AAAA'],input[placeholder='年龄'],input[placeholder='生日'],input[placeholder='出生日期'],input[placeholder='出生年月日'],input[aria-label='Age'],input[aria-label='年龄'],input[aria-label='生日'],input[aria-label='出生日期'],input[aria-label='出生年月日'],input[placeholder='YYYY/MM/DD'],input[placeholder='YYYY-MM-DD'],input[placeholder='MM/DD/YYYY'],input[aria-label='YYYY/MM/DD'],input[aria-label='YYYY-MM-DD'],input[aria-label='MM/DD/YYYY']"
 DATE_GROUPS = "[role='group']"
@@ -66,6 +67,7 @@ INSPECT_SCRIPT = r"""() => {
     const email = first("#email,input[name='email'],input[type='email'],input[autocomplete='email']");
     const password = first("input[type='password'],input[name='password'],input[autocomplete='new-password'],input[autocomplete='current-password']");
     const code = first("input[name='code'],input[autocomplete='one-time-code'],input[inputmode='numeric'][maxlength='6']");
+    const passwordSignup = first("a[href='/create-account/password'],a[href$='/create-account/password']");
     const name = first("input[name='name'],input[name='fullName'],input[name='full_name'],input[id='name'],input[id='fullName'],input[id='full-name'],input[autocomplete='name'],input[placeholder='Full name'],input[placeholder='Name'],input[placeholder='Nome completo'],input[placeholder='Nome'],input[placeholder='全名'],input[placeholder='姓名'],input[aria-label='Full name'],input[aria-label='Name'],input[aria-label='Nome completo'],input[aria-label='Nome'],input[aria-label='全名'],input[aria-label='姓名']");
     const profile = first("input[name='age'],input[name='birthdate'],input[name='birthday'],input[name='date_of_birth'],input[name='dob'],input[id='age'],input[id*='birth'],input[id*='nascimento'],input[autocomplete='bday'],input[type='date'],input[placeholder='Age'],input[placeholder='Idade'],input[placeholder='Data de nascimento'],input[aria-label='Idade'],input[aria-label='Data de nascimento'],input[placeholder='DD/MM/AAAA'],input[aria-label='DD/MM/AAAA'],input[placeholder='年龄'],input[placeholder='生日'],input[placeholder='出生日期'],input[placeholder='出生年月日'],input[aria-label='Age'],input[aria-label='年龄'],input[aria-label='生日'],input[aria-label='出生日期'],input[aria-label='出生年月日'],input[placeholder='YYYY/MM/DD'],input[placeholder='YYYY-MM-DD'],input[placeholder='MM/DD/YYYY'],input[aria-label='YYYY/MM/DD'],input[aria-label='YYYY-MM-DD'],input[aria-label='MM/DD/YYYY']");
     const dateGroups = Array.from(document.querySelectorAll("[role='group']")).filter(visible);
@@ -109,6 +111,7 @@ INSPECT_SCRIPT = r"""() => {
         emailValue: email ? (email.value || '') : '',
         password: !!password,
         code: !!code,
+        passwordSignup: !!passwordSignup,
         codeInvalid: !!code && (code.getAttribute('aria-invalid') === 'true' || /invalid|incorrect|wrong|expired|inv[áa]lido|incorreto|expirou|expirado|错误|无效|过期|正しくありません|無効|有効期限/i.test(alerts)),
         name: !!name,
         nameValue: name ? (name.value || '') : '',
@@ -153,6 +156,7 @@ class Signals:
     email_value: str = ""
     password: bool = False
     code: bool = False
+    password_signup: bool = False
     code_invalid: bool = False
     name: bool = False
     name_value: str = ""
@@ -183,6 +187,8 @@ def classify_page(signals: Signals) -> str:
     rejected = signals.code_invalid or contains(signals.body, REJECTED_TEXT)
     if signals.code and rejected:
         return "code_rejected"
+    if signals.code and signals.password_signup:
+        return "password_choice"
     if signals.code:
         return "code"
     if signals.email:
@@ -195,7 +201,7 @@ def classify_page(signals: Signals) -> str:
 
 
 def poll_interval(state: str) -> float:
-    if state in ("email", "password", "profile", "code", "code_rejected", "retry", "ready"):
+    if state in ("email", "password_choice", "password", "profile", "code", "code_rejected", "retry", "ready"):
         return FAST_POLL_INTERVAL
     if state == "challenge":
         return CHALLENGE_POLL_INTERVAL
@@ -275,7 +281,8 @@ async def inspect_page(page: Any) -> Signals:
         url=str(values.get("url", "")), body=str(values.get("body", "")),
         document_key=str(values.get("documentKey", "")), email=bool(values.get("email")),
         email_value=str(values.get("emailValue", "")), password=bool(values.get("password")),
-        code=bool(values.get("code")), code_invalid=bool(values.get("codeInvalid")),
+        code=bool(values.get("code")), password_signup=bool(values.get("passwordSignup")),
+        code_invalid=bool(values.get("codeInvalid")),
         name=bool(values.get("name")), name_value=str(values.get("nameValue", "")),
         profile_field=str(values.get("profileField", "")), profile_value=str(values.get("profileValue", "")),
         profile_invalid=bool(values.get("profileInvalid")), profile_key=str(values.get("profileKey", "")),
@@ -292,7 +299,7 @@ def navigation_interrupted(exc: BaseException) -> bool:
 async def inspect_context(context: Any) -> tuple[Any, Signals, str]:
     rank = {
         "ready": 11, "challenge": 10, "disabled": 9, "retry": 8, "profile": 7,
-        "password": 6, "code_rejected": 5, "code": 4, "email": 3, "wait": 1,
+        "password": 7, "password_choice": 6, "code_rejected": 5, "code": 4, "email": 3, "wait": 1,
     }
     best: Optional[tuple[Any, Signals, str]] = None
     for page in reversed(tuple(context.pages)):
@@ -582,6 +589,7 @@ class RegistrationFlow:
         self.log = log
         self.codes = VerificationCodes(request_code)
         self.email = EmailSubmissionGate()
+        self.password_choice = SubmissionGate()
         self.password = SubmissionGate()
         self.profile = ProfileSubmissionGate()
         self.retry = SubmissionGate()
@@ -601,7 +609,7 @@ class RegistrationFlow:
             if state_key != self.last_state_key:
                 parsed = urlsplit(signals.url)
                 fields = ",".join(name for name, present in (
-                    ("email", signals.email), ("password", signals.password), ("code", signals.code),
+                    ("email", signals.email), ("password_choice", signals.password_signup), ("password", signals.password), ("code", signals.code),
                     ("name", signals.name), ("profile", bool(signals.profile_field)), ("ready", signals.ready),
                     ("challenge", signals.challenge),
                 ) if present) or "none"
@@ -644,6 +652,13 @@ class RegistrationFlow:
         if state == "email":
             await self._handle_email(page, signals, now)
             return False
+        if state == "password_choice":
+            choose_password = self.payload["registration_flow"] == "password" and self.password.pending()
+            if choose_password:
+                await self._handle_password_choice(page, now)
+                return False
+            await self.codes.step(page, signals, "code", now)
+            return False
         if state == "password":
             await self._handle_password(page, now)
             return False
@@ -678,6 +693,33 @@ class RegistrationFlow:
             await self.log(f"email submission {self.email.attempts}/3: click completed")
             return
         self.email.ensure_progress(now)
+
+    async def _handle_password_choice(self, page: Any, now: float) -> None:
+        if self.password_choice.pending():
+            await self.log("password registration selected; opening password creation page")
+            link = page.locator(PASSWORD_SIGNUP).first
+            await link.wait_for(state="visible", timeout=10000)
+            href = str((await link.get_attribute("href")) or "").strip()
+            target = urljoin(page.url, href) if href else ""
+            try:
+                await link.evaluate("element => element.click()")
+            except Exception as exc:
+                if not navigation_interrupted(exc):
+                    raise
+            for _ in range(20):
+                if urlsplit(page.url).path == "/create-account/password":
+                    self.password_choice.mark(monotonic_time())
+                    return
+                await asyncio.sleep(0.25)
+            if not href:
+                raise SidecarError("password_choice_navigation", "password registration link has no destination", True)
+            await self.log("password registration click did not navigate; following link destination")
+            await page.goto(target, wait_until="domcontentloaded", timeout=30000)
+            if urlsplit(page.url).path != "/create-account/password":
+                raise SidecarError("password_choice_navigation", "password registration page did not open", True)
+            self.password_choice.mark(monotonic_time())
+            return
+        self.password_choice.ensure_progress(now, "password_choice_stalled", "password registration link did not advance")
 
     async def _handle_password(self, page: Any, now: float) -> None:
         if self.password.pending():

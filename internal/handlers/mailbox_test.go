@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"chatgpt-register/internal/mailcom"
 	"chatgpt-register/internal/mailfetch"
 	"chatgpt-register/internal/models"
 
@@ -29,7 +30,9 @@ func mailboxTestHandler(t *testing.T) (*Handler, *gin.Engine) {
 	}
 	handler := &Handler{DB: database, Mail: mailfetch.New()}
 	router := gin.New()
+	router.POST("/mailboxes", handler.MailboxCreate)
 	router.POST("/mailboxes/import", handler.MailboxImport)
+	router.PUT("/mailboxes/:id", handler.MailboxUpdate)
 	router.GET("/mailboxes/options", handler.MailboxOptions)
 	router.GET("/mailboxes", handler.MailboxList)
 	router.POST("/registrations/mailbox-links", handler.RegistrationMailboxLinks)
@@ -37,6 +40,32 @@ func mailboxTestHandler(t *testing.T) (*Handler, *gin.Engine) {
 	router.POST("/categories", handler.CategoryCreate)
 	router.POST("/categories/assign", handler.CategoryAssign)
 	return handler, router
+}
+
+func TestMailboxListDoesNotExposeCredentials(t *testing.T) {
+	handler, router := mailboxTestHandler(t)
+	mailbox := models.Mailbox{
+		Email: "sensitive@example.test", Password: "mail-password", ClientID: "client-secret",
+		RefreshToken: "refresh-secret", CodeURL: "https://codes.example.test/api?token=code-secret", Status: "verified",
+	}
+	if err := handler.DB.Create(&mailbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/mailboxes", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, secret := range []string{"mail-password", "client-secret", "refresh-secret", "code-secret", "https://codes.example.test"} {
+		if strings.Contains(response.Body.String(), secret) {
+			t.Fatalf("list leaked %q: %s", secret, response.Body.String())
+		}
+	}
+	for _, flag := range []string{"\"password_configured\":true", "\"client_id_configured\":true", "\"refresh_token_configured\":true", "\"code_url_configured\":true"} {
+		if !strings.Contains(response.Body.String(), flag) {
+			t.Fatalf("list missing %s: %s", flag, response.Body.String())
+		}
+	}
 }
 
 func TestMailboxOptionsReturnsOnlyVerifiedIDAndEmail(t *testing.T) {
@@ -57,6 +86,73 @@ func TestMailboxOptionsReturnsOnlyVerifiedIDAndEmail(t *testing.T) {
 		if strings.Contains(response.Body.String(), forbidden) {
 			t.Fatalf("options leaked %q: %s", forbidden, response.Body.String())
 		}
+	}
+}
+
+func TestMailboxImportRejectsAccountCategory(t *testing.T) {
+	handler, router := mailboxTestHandler(t)
+	category := models.Category{Scope: "account", Name: "账户分类"}
+	if err := handler.DB.Create(&category).Error; err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"items":[{"email":"wrong-scope@example.test","code_url":"https://codes.example.test/value"}],"category_id":%d}`, category.ID)
+	request := httptest.NewRequest(http.MethodPost, "/mailboxes/import", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "作用域") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var count int64
+	if err := handler.DB.Model(&models.Mailbox{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("count=%d error=%v", count, err)
+	}
+}
+
+func TestMailboxImportAppliesSelectedCategory(t *testing.T) {
+	handler, router := mailboxTestHandler(t)
+	category := models.Category{Scope: "mailbox", Name: "批量导入分类"}
+	if err := handler.DB.Create(&category).Error; err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"items":[{"email":"categorized@example.test","code_url":"https://codes.example.test/value"}],"category_id":%d}`, category.ID)
+	request := httptest.NewRequest(http.MethodPost, "/mailboxes/import", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"added":1`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var mailbox models.Mailbox
+	if err := handler.DB.Where("email = ?", "categorized@example.test").First(&mailbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	if mailbox.CategoryID == nil || *mailbox.CategoryID != category.ID {
+		t.Fatalf("category_id=%v want=%d", mailbox.CategoryID, category.ID)
+	}
+}
+
+func TestMailboxUpdateClearsCodeURLWhenSwitchingProvider(t *testing.T) {
+	handler, router := mailboxTestHandler(t)
+	mailbox := models.Mailbox{
+		Email: "switch@example.test", Provider: "api", CodeURL: "https://codes.example.test/api?token=old", Status: "verified",
+	}
+	if err := handler.DB.Create(&mailbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPut, "/mailboxes/"+strconv.FormatUint(uint64(mailbox.ID), 10), strings.NewReader(`{"email":"switch@example.test","provider":"outlook","client_id":"new-client","refresh_token":"new-refresh","status":"verified"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "new-refresh") || strings.Contains(response.Body.String(), "old") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var updated models.Mailbox
+	if err := handler.DB.First(&updated, mailbox.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updated.Provider != "outlook" || updated.CodeURL != "" || updated.ClientID != "new-client" || updated.RefreshToken != "new-refresh" {
+		t.Fatalf("mailbox=%+v", updated)
 	}
 }
 
@@ -170,6 +266,71 @@ func TestMailboxImportAPICodeURLIsWriteOnly(t *testing.T) {
 	}
 	if len(list.Data) != 1 || !list.Data[0].CodeURLConfigured {
 		t.Fatalf("list=%+v", list.Data)
+	}
+}
+
+func TestMailboxImportMailComProvider(t *testing.T) {
+	handler, router := mailboxTestHandler(t)
+	request := httptest.NewRequest(http.MethodPost, "/mailboxes/import", strings.NewReader(`{"items":[{"email":"user@mail.com","password":"mail-password","provider":"mailcom"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"added":1`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var mailbox models.Mailbox
+	if err := handler.DB.First(&mailbox, "email = ?", "user@mail.com").Error; err != nil {
+		t.Fatal(err)
+	}
+	if mailbox.Provider != "mailcom" || mailbox.Password != "mail-password" || mailbox.Status != "verifying" {
+		t.Fatalf("mailbox=%+v", mailbox)
+	}
+	if strings.Contains(response.Body.String(), "mail-password") {
+		t.Fatalf("import response leaked password: %s", response.Body.String())
+	}
+}
+
+func TestMailboxImportRecognizesMailComDomainWithEmailAndPassword(t *testing.T) {
+	handler, router := mailboxTestHandler(t)
+	request := httptest.NewRequest(http.MethodPost, "/mailboxes/import", strings.NewReader(`{"items":[{"email":"Rivers_Prattyor@musician.org","password":"mail-password"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"added":1`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var mailbox models.Mailbox
+	if err := handler.DB.First(&mailbox, "email = ?", "Rivers_Prattyor@musician.org").Error; err != nil {
+		t.Fatal(err)
+	}
+	if mailbox.Provider != mailcom.Provider || mailbox.Password != "mail-password" || mailbox.Status != "verifying" {
+		t.Fatalf("mailbox=%+v", mailbox)
+	}
+}
+
+func TestMailboxImportRejectsInvalidMailComCredentials(t *testing.T) {
+	handler, router := mailboxTestHandler(t)
+	request := httptest.NewRequest(http.MethodPost, "/mailboxes/import", strings.NewReader(`{"items":[{"email":"user@example.com","password":"mail-password","provider":"mailcom"},{"email":"second@mail.com","provider":"mailcom"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"added":0`) || !strings.Contains(response.Body.String(), `"skipped":2`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var count int64
+	if err := handler.DB.Model(&models.Mailbox{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("count=%d error=%v", count, err)
+	}
+}
+
+func TestMailboxCreateRejectsMailComWithoutPassword(t *testing.T) {
+	_, router := mailboxTestHandler(t)
+	request := httptest.NewRequest(http.MethodPost, "/mailboxes", strings.NewReader(`{"email":"user@mail.com","provider":"mailcom"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "mail.com") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

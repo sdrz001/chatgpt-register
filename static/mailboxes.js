@@ -35,7 +35,7 @@ async function loadMailboxes() {
     document.getElementById('mb-rows').innerHTML = (d.data || []).map(x => `
       <tr class="${mbSelected.has(x.id) ? 'row-sel' : ''}">
         <td class="col-check"><input type="checkbox" ${mbSelected.has(x.id) ? 'checked' : ''} onclick="toggleSelect(${x.id}, this.checked)"></td>
-        <td><div>${esc(x.email)}</div>${x.provider === 'domain_api' ? '<span class="table-muted">域名邮 API</span>' : ''}</td>
+        <td><div>${esc(x.email)}</div>${x.provider === 'mailcom' ? '<span class="table-muted">mail.com 网页邮箱 · 裂变地址自动创建</span>' : x.provider === 'domain_api' ? '<span class="table-muted">域名邮 API</span>' : ''}</td>
         <td>${x.category ? `<span class="category-chip">${esc(x.category.name)}</span>` : '<span class="table-muted">未分类</span>'}</td>
         <td>${Number(x.register_count || 0)} / ${Number(x.register_limit || 0)}</td>
         <td>${fmtTime(x.created_at)}</td>
@@ -67,6 +67,7 @@ async function loadMailboxCategories() {
   mailboxCategories = d.data || [];
   rebuildMailboxCategorySelect('mb-category-filter', '全部分类', true);
   rebuildMailboxCategorySelect('batch-mailbox-category', '批量归类', true);
+  rebuildMailboxCategorySelect('import-category', '未分类', false);
   rebuildMailboxCategorySelect('mb-category', '未分类', false);
   rebuildMailboxCategorySelect('domain-mail-category', '未分类', false);
   renderMailboxCategories();
@@ -277,7 +278,10 @@ async function generateDomainMailboxes() {
 function openImportModal() {
   document.getElementById('import-text').value = '';
   document.getElementById('import-count').textContent = '已识别 0 个邮箱';
+  document.getElementById('import-category').value = '';
+  syncSelect('import-category');
   document.getElementById('import-modal').style.display = 'flex';
+  loadMailboxCategories();
 }
 
 function updateImportCount() {
@@ -318,6 +322,10 @@ function parseImportLines(text) {
       return;
     }
     const parts = line.split('----').map(p => p.trim());
+    if (parts.length === 2 || (parts.length === 3 && parts[2].toLowerCase() === 'mailcom')) {
+      items.push({ email, password: parts[1], provider: 'mailcom' });
+      return;
+    }
     if (parts.length !== 4) return;
     items.push({ email, password: parts[1], client_id: parts[2], refresh_token: parts[3] });
   });
@@ -328,15 +336,17 @@ async function doImport() {
   const text = document.getElementById('import-text').value;
   const items = parseImportLines(text);
   if (!items.length) return toast('没有可导入的有效行', true);
+  const category = document.getElementById('import-category').value;
   const r = await api('/api/mailboxes/import', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items }),
+    body: JSON.stringify({ items, category_id: category ? Number(category) : null }),
   });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) return toast('导入失败: ' + (d.error || r.status), true);
   closeModal('import-modal');
-  toast(`识别 ${items.length} 个：新增 ${d.added}，跳过 ${d.skipped}`);
+  const detail = [`新增 ${d.added}`, `重复 ${d.duplicates || 0}`, `无效 ${d.invalid || 0}`].join('，');
+  toast(`识别 ${items.length} 个：${detail}`);
   mbPage = 1;
   loadMailboxes();
   if (d.added > 0) verifyAll(); // 导入后自动验证
@@ -399,10 +409,16 @@ function openMailboxModal(data) {
   document.getElementById('mb-modal-title').textContent = data ? '编辑邮箱 #' + data.id : '新增邮箱';
   document.getElementById('mb-id').value = data ? data.id : '';
   document.getElementById('mb-email').value = data ? data.email : '';
-  document.getElementById('mb-password').value = data ? data.password : '';
+  const password = document.getElementById('mb-password');
+  password.value = '';
+  password.placeholder = data && data.password_configured ? '已配置；留空保持不变' : '请输入密码';
   document.getElementById('mb-provider').value = data ? data.provider : '';
-  document.getElementById('mb-client-id').value = data ? data.client_id : '';
-  document.getElementById('mb-refresh-token').value = data ? data.refresh_token : '';
+  const clientID = document.getElementById('mb-client-id');
+  clientID.value = '';
+  clientID.placeholder = data && data.client_id_configured ? '已配置；留空保持不变' : 'Outlook Client ID';
+  const refreshToken = document.getElementById('mb-refresh-token');
+  refreshToken.value = '';
+  refreshToken.placeholder = data && data.refresh_token_configured ? '已配置；留空保持不变' : 'Outlook Refresh Token';
   const codeURL = document.getElementById('mb-code-url');
   codeURL.value = '';
   codeURL.placeholder = data && data.code_url_configured ? '已配置；留空保持不变' : '输入 http/https 取码 API 地址';

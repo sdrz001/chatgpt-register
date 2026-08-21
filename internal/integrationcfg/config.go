@@ -2,6 +2,7 @@ package integrationcfg
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,10 @@ type DomainMailConfig struct {
 	Client     domainmail.Config
 	Domain     string
 	ExpiryTime int64
+}
+
+type MailComConfig struct {
+	OAuthPublicSecret string
 }
 
 func Load(db *gorm.DB) (Values, error) {
@@ -106,6 +111,14 @@ func (v Values) DomainMail() (DomainMailConfig, error) {
 		}
 	}
 	return config, nil
+}
+
+func (v Values) MailCom() (MailComConfig, error) {
+	secret := strings.TrimSpace(v["mail_com_oauth_public_secret"])
+	if secret == "" {
+		secret = strings.TrimSpace(os.Getenv("MAIL_COM_OAUTH_PUBLIC_SECRET"))
+	}
+	return MailComConfig{OAuthPublicSecret: secret}, nil
 }
 
 func (v Values) SMS() (SMSConfig, error) {

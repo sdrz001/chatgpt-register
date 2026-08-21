@@ -73,7 +73,16 @@
     <input type="hidden" id="mb-id">
     <label>Email *</label><input id="mb-email" class="px-input">
     <label>密码</label><input id="mb-password" class="px-input">
-    <label>服务商</label><input id="mb-provider" class="px-input" placeholder="outlook / gmail ...">
+    <label>服务商</label>
+    <select id="mb-provider" class="px-input">
+      <option value="">通用邮箱</option>
+      <option value="mailcom">mail.com（网页取件）</option>
+      <option value="api">取码 API 地址</option>
+      <option value="domain_api">域名邮 API</option>
+      <option value="outlook">Outlook（Graph）</option>
+      <option value="gmail">Gmail</option>
+    </select>
+    <span class="field-hint">mail.com 体系（包括 musician.org 等官方域名）只需要邮箱和密码；系统通过 HTTP 协议自动获取网页应用配置。</span>
     <label>Client ID（Outlook 取件用）</label><input id="mb-client-id" class="px-input">
     <label>Refresh Token（Outlook 取件用）</label><textarea id="mb-refresh-token" class="px-input" rows="2"></textarea>
     <label>取码 API 地址</label><input id="mb-code-url" class="px-input" type="password" autocomplete="new-password" placeholder="留空保留已保存地址">
@@ -128,11 +137,18 @@
     <h2>批量导入邮箱</h2>
     <div class="import-sub">每行一个，重复 email 自动跳过，支持以下格式：</div>
     <div class="import-formats">
+      <code>someone@mail.com----密码</code>
+      <code>someone@musician.org----密码</code>
+      <code>someone@mail.com----密码----mailcom</code>
       <code>someone@outlook.com----密码----client_id----refresh_token</code>
       <code>someone@icloud.com-----取码 API 地址</code>
       <code>someone@icloud.com-----任意中间字段-----取码 API 地址</code>
     </div>
     <textarea id="import-text" class="px-input import-textarea" rows="11" placeholder="在此粘贴内容，或直接把 txt 文件拖到这里 ..."></textarea>
+    <label>导入分类</label>
+    <select id="import-category" class="px-input">
+      <option value="">未分类</option>
+    </select>
     <div class="modal-actions">
       <span id="import-count" class="import-count">已识别 0 个邮箱</span>
       <button class="px-btn" onclick="closeModal('import-modal')">取消</button>
@@ -163,6 +179,6 @@
 
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js"></script>
-<script src="/static/mailboxes.js?v=11"></script>
+<script src="/static/mailboxes.js?v=14"></script>
 </body>
 </html>

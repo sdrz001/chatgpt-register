@@ -47,14 +47,15 @@ type sidecarStartMessage struct {
 }
 
 type sidecarStartPayload struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	FullName string `json:"full_name"`
-	Age      string `json:"age"`
-	Proxy    string `json:"proxy"`
-	Headless bool   `json:"headless"`
-	Locale   string `json:"locale"`
-	Timezone string `json:"timezone"`
+	Email            string `json:"email"`
+	Password         string `json:"password"`
+	FullName         string `json:"full_name"`
+	Age              string `json:"age"`
+	Proxy            string `json:"proxy"`
+	Headless         bool   `json:"headless"`
+	RegistrationFlow string `json:"registration_flow"`
+	Locale           string `json:"locale"`
+	Timezone         string `json:"timezone"`
 }
 
 type sidecarMessage struct {
@@ -278,7 +279,7 @@ func registerSidecar(ctx context.Context, in Input) (string, error) {
 	locale, timezone := sidecarLocaleTimezone(in)
 	start := sidecarStartMessage{
 		Version: sidecarProtocolVersion, Type: "start", RequestID: requestID,
-		Payload: sidecarStartPayload{Email: in.Email, Password: in.Password, FullName: in.FullName, Age: in.Age, Proxy: normalizeProxy(in.Proxy), Headless: in.Headless, Locale: locale, Timezone: timezone},
+		Payload: sidecarStartPayload{Email: in.Email, Password: in.Password, FullName: in.FullName, Age: in.Age, Proxy: normalizeProxy(in.Proxy), Headless: in.Headless, RegistrationFlow: in.RegistrationFlow, Locale: locale, Timezone: timezone},
 	}
 	if err := process.writer.send(start); err != nil {
 		_ = process.wait(true)

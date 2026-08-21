@@ -62,6 +62,22 @@ func TestNormalizeBackend(t *testing.T) {
 	}
 }
 
+func TestNormalizeRegistrationFlow(t *testing.T) {
+	for input, want := range map[string]string{
+		"":             RegistrationFlowEmailCode,
+		" EMAIL_CODE ": RegistrationFlowEmailCode,
+		"PASSWORD":     RegistrationFlowPassword,
+	} {
+		got, err := normalizeRegistrationFlow(input)
+		if err != nil || got != want {
+			t.Fatalf("normalizeRegistrationFlow(%q)=(%q, %v) want %q", input, got, err, want)
+		}
+	}
+	if _, err := normalizeRegistrationFlow("other"); err == nil {
+		t.Fatal("normalizeRegistrationFlow(other) returned nil error")
+	}
+}
+
 func TestRedactSensitiveKeepsAuthHostsAndMasksLongJWT(t *testing.T) {
 	jwt := "abc." + strings.Repeat("p", 16) + "." + strings.Repeat("s", 8)
 	clean := redactSensitive("host=auth.openai.com host=chatgpt.com token="+jwt, Input{}, "", "")
@@ -279,6 +295,7 @@ func sidecarTestInput(t *testing.T, mode string) Input {
 		Proxy:            "proxy-user:proxy-password@127.0.0.1:8080",
 		Headless:         true,
 		Backend:          BackendCloakBrowser,
+		RegistrationFlow: RegistrationFlowPassword,
 		PythonExecutable: os.Args[0],
 		SidecarScript:    "-test.run=^TestSidecarHelperProcess$",
 		FetchCode:        func(context.Context) (string, error) { return "654321", nil },
@@ -310,7 +327,7 @@ func runSidecarHelper(mode string) error {
 	if start.Version != sidecarProtocolVersion || start.Type != "start" || start.RequestID == "" {
 		return fmt.Errorf("invalid start envelope: %+v", start)
 	}
-	if start.Payload.Email != "sensitive@example.test" || start.Payload.Password != "secret-password" || start.Payload.FullName != "Sidecar User" || start.Payload.Age != "25" || start.Payload.Proxy != "http://proxy-user:proxy-password@127.0.0.1:8080" || !start.Payload.Headless {
+	if start.Payload.Email != "sensitive@example.test" || start.Payload.Password != "secret-password" || start.Payload.FullName != "Sidecar User" || start.Payload.Age != "25" || start.Payload.Proxy != "http://proxy-user:proxy-password@127.0.0.1:8080" || !start.Payload.Headless || start.Payload.RegistrationFlow != RegistrationFlowPassword {
 		return fmt.Errorf("invalid start payload")
 	}
 	encoder := json.NewEncoder(os.Stdout)

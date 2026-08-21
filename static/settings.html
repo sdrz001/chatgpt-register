@@ -33,7 +33,7 @@
         </div>
         <div class="field">
           <label>裂变数量</label>
-          <span class="field-hint">每个母账号最多创建的裂变账号数；设为 0 表示只注册母账号</span>
+          <span class="field-hint">每个母账号最多创建的裂变账号数；普通邮箱沿用自身支持的别名机制，mail.com 会自动通过网页端创建真实地址；mail.com 数量仍受远端配额限制。设为 0 表示只注册母账号</span>
           <div class="input-suffix">
             <input id="set-fission-count" class="px-input" type="number" min="0" max="100" placeholder="默认 5">
             <span class="suffix">次</span>
@@ -44,6 +44,14 @@
           <select id="set-browser-backend" class="px-input" onchange="updateBrowserBackend()">
             <option value="rod">模式1 当前浏览器（rod）</option>
             <option value="cloakbrowser">模式2 Python CloakBrowser</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>注册流程</label>
+          <span class="field-hint">密码注册会在邮箱验证页选择密码入口并设置账号密码；按页面路径识别，不受浏览器语言影响</span>
+          <select id="set-registration-flow" class="px-input">
+            <option value="email_code">一次性验证码注册</option>
+            <option value="password">密码注册</option>
           </select>
         </div>
         <div class="field">
@@ -169,7 +177,7 @@
           </span>
           <div>
             <h2>邮箱来源</h2>
-            <p>保留导入邮箱，同时支持通过域名邮 API 生成并自动取码</p>
+            <p>支持导入 Outlook、CodeURL、mail.com 邮箱，也支持通过域名邮 API 生成并自动取码</p>
           </div>
         </div>
         <div class="field">
@@ -178,6 +186,11 @@
             <option value="import">导入邮箱</option>
             <option value="domain_api">域名邮 API</option>
           </select>
+        </div>
+        <div class="field settings-span-2">
+          <label>mail.com OAuth Public Secret（高级覆盖）</label>
+          <span id="mail-com-secret-hint" class="field-hint">默认通过 HTTP 协议从 mail.com 当前网页构建自动获取并共享缓存；仅在自动获取异常时填写覆盖值</span>
+          <input id="set-mail-com-secret" class="px-input" type="password" autocomplete="new-password" placeholder="默认留空自动获取">
         </div>
         <div id="domain-mail-fields" class="settings-form-grid">
           <div class="field settings-span-2">
@@ -393,6 +406,7 @@ async function loadSettings() {
   document.getElementById('set-max-concurrency').value = d.max_concurrency || '10';
   document.getElementById('set-fission-count').value = d.fission_count || '5';
   document.getElementById('set-browser-backend').value = d.browser_backend || 'rod';
+  document.getElementById('set-registration-flow').value = d.registration_flow || 'email_code';
   document.getElementById('set-python-executable').value = d.python_executable || '';
   updateBrowserBackend();
   document.getElementById('set-browser-visible').checked = d.headless === '0';
@@ -417,6 +431,8 @@ async function loadSettings() {
   document.getElementById('set-sub2api-timeout').value = d.sub2api_timeout || '60';
   fillSub2APIGroups([], parseIDList(d.sub2api_group_ids));
   document.getElementById('set-mailbox-source').value = d.mailbox_source || 'import';
+  document.getElementById('set-mail-com-secret').value = '';
+  document.getElementById('mail-com-secret-hint').textContent = d.mail_com_oauth_configured === '1' ? '已保存覆盖值；留空保持不变' : '自动模式：通过 HTTP 协议获取并共享缓存';
   document.getElementById('set-domain-mail-url').value = d.domain_mail_url || 'https://bikaqiuruanjian.com';
   const domainKeyInput = document.getElementById('set-domain-mail-api-key');
   domainKeyInput.value = '';
@@ -426,6 +442,7 @@ async function loadSettings() {
   fillDomainMailDomains([], d.domain_mail_domain || '');
   document.getElementById('set-domain-mail-expiry').value = d.domain_mail_expiry_time || '3600000';
   syncSelect('set-browser-backend');
+  syncSelect('set-registration-flow');
   syncSelect('set-sms-platform');
   syncSelect('set-sms-country');
   syncSelect('set-mailbox-source');
@@ -601,6 +618,7 @@ async function saveSettings() {
     max_concurrency: document.getElementById('set-max-concurrency').value.trim(),
     fission_count: document.getElementById('set-fission-count').value.trim(),
     browser_backend: document.getElementById('set-browser-backend').value,
+    registration_flow: document.getElementById('set-registration-flow').value,
     python_executable: document.getElementById('set-python-executable').value,
     headless: document.getElementById('set-browser-visible').checked ? '0' : '1',
     at_auto_check: document.getElementById('set-at-auto-check').checked ? '1' : '0',
@@ -683,6 +701,7 @@ async function saveDomainMailSettings() {
   if (source === 'domain_api' && !domain) return toast('请选择域名邮域名', true);
   const body = {
     mailbox_source: source,
+    mail_com_oauth_public_secret: document.getElementById('set-mail-com-secret').value.trim(),
     domain_mail_url: url,
     domain_mail_api_key: document.getElementById('set-domain-mail-api-key').dataset.userEdited === '1' ? document.getElementById('set-domain-mail-api-key').value.trim() : '',
     domain_mail_domain: domain,
@@ -691,6 +710,10 @@ async function saveDomainMailSettings() {
   const r = await saveSettingBody(body);
   const d = await r.json().catch(() => ({}));
   if (!r.ok) return toast(d.error || '保存失败', true);
+  if (body.mail_com_oauth_public_secret) {
+    document.getElementById('set-mail-com-secret').value = '';
+    document.getElementById('mail-com-secret-hint').textContent = '已保存覆盖值；留空保持不变';
+  }
   if (body.domain_mail_api_key) {
     const keyInput = document.getElementById('set-domain-mail-api-key');
     keyInput.value = '';

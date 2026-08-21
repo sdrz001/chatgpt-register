@@ -693,12 +693,31 @@ func (h *Handler) CategoryList(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	for i := range categories {
-		if scope == "account" {
-			h.DB.Model(&models.Registration{}).Where("category_id = ?", categories[i].ID).Count(&categories[i].ItemCount)
-		} else {
-			h.DB.Model(&models.Mailbox{}).Where("category_id = ?", categories[i].ID).Count(&categories[i].ItemCount)
+	counts := make(map[uint]int64, len(categories))
+	if len(categories) > 0 {
+		ids := make([]uint, 0, len(categories))
+		for _, category := range categories {
+			ids = append(ids, category.ID)
 		}
+		model := h.DB.Model(&models.Mailbox{})
+		if scope == "account" {
+			model = h.DB.Model(&models.Registration{})
+		}
+		type categoryCount struct {
+			CategoryID uint  `gorm:"column:category_id"`
+			Count      int64 `gorm:"column:item_count"`
+		}
+		var rows []categoryCount
+		if err := model.Select("category_id, COUNT(*) AS item_count").Where("category_id IN ?", ids).Group("category_id").Scan(&rows).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		for _, row := range rows {
+			counts[row.CategoryID] = row.Count
+		}
+	}
+	for i := range categories {
+		categories[i].ItemCount = counts[categories[i].ID]
 	}
 	c.JSON(http.StatusOK, gin.H{"data": categories})
 }

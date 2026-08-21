@@ -3,6 +3,7 @@
 package mailfetch
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,6 +22,9 @@ import (
 	"time"
 
 	"chatgpt-register/internal/domainmail"
+	"chatgpt-register/internal/mailcom"
+
+	xhtml "golang.org/x/net/html"
 )
 
 const (
@@ -47,14 +51,16 @@ var (
 
 // Account 一条邮箱凭据。
 type Account struct {
-	Email             string
-	Provider          string
-	ClientID          string
-	RefreshToken      string
-	CodeURL           string
-	RemoteMailboxID   string
-	DomainMailBaseURL string
-	DomainMailAPIKey  string
+	Email                    string
+	Password                 string
+	Provider                 string
+	ClientID                 string
+	RefreshToken             string
+	CodeURL                  string
+	RemoteMailboxID          string
+	DomainMailBaseURL        string
+	DomainMailAPIKey         string
+	MailComOAuthPublicSecret string
 }
 
 // Message 一封邮件。列表接口只返回头部（ID/发件人/主题/时间），正文按需单独拉取。
@@ -75,9 +81,11 @@ type cachedToken struct {
 
 // Client 无状态可全局复用，内部按 refresh_token 缓存 access_token。
 type Client struct {
-	http   *http.Client
-	tokMu  sync.Mutex
-	tokens map[string]cachedToken
+	http      *http.Client
+	tokMu     sync.Mutex
+	tokens    map[string]cachedToken
+	mailComMu sync.Mutex
+	mailCom   map[string]*mailcom.Client
 }
 
 type Option func(*Client)
@@ -92,8 +100,9 @@ func WithHTTPClient(client *http.Client) Option {
 
 func New(options ...Option) *Client {
 	client := &Client{
-		http:   &http.Client{Timeout: 15 * time.Second},
-		tokens: map[string]cachedToken{},
+		http:    &http.Client{Timeout: 15 * time.Second},
+		tokens:  map[string]cachedToken{},
+		mailCom: map[string]*mailcom.Client{},
 	}
 	for _, option := range options {
 		option(client)
@@ -112,6 +121,13 @@ func ValidateCodeURL(rawURL string) error {
 // Verify 校验一条邮箱凭据是否可用：尝试用 refresh_token 换取 access_token。
 // 批量并发验证时微软 token 端点会偶发限流/瞬时错误，这里带指数退避重试，避免误判为失败。
 func (c *Client) Verify(ctx context.Context, acc Account) error {
+	if isMailCom(acc) {
+		client, err := c.mailComClient(acc)
+		if err != nil {
+			return err
+		}
+		return client.Verify(ctx, mailcom.Account{Email: acc.Email, Password: acc.Password})
+	}
 	if isDomainMail(acc) {
 		_, err := c.listDomainMessages(ctx, acc, 1)
 		return err
@@ -146,6 +162,17 @@ func (c *Client) Verify(ctx context.Context, acc Account) error {
 // ListMessages 拉 Inbox + JunkEmail 最新邮件的头部（不含正文），两个文件夹并发拉取，按时间倒序合并返回。
 // 正文由 GetMessage 按需单独拉取，避免每次列表都传输大量 HTML 拖慢速度。
 func (c *Client) ListMessages(ctx context.Context, acc Account, limit int) ([]Message, error) {
+	if isMailCom(acc) {
+		client, err := c.mailComClient(acc)
+		if err != nil {
+			return nil, err
+		}
+		messages, err := client.ListMessages(ctx, mailcom.Account{Email: acc.Email, Password: acc.Password}, limit)
+		if err != nil {
+			return nil, err
+		}
+		return mailComMessages(messages), nil
+	}
 	if isDomainMail(acc) {
 		return c.listDomainMessages(ctx, acc, limit)
 	}
@@ -197,6 +224,9 @@ func (c *Client) ListMessages(ctx context.Context, acc Account, limit int) ([]Me
 }
 
 func (c *Client) SearchMessages(ctx context.Context, acc Account, query string, limit int) ([]Message, error) {
+	if isMailCom(acc) {
+		return c.ListMessages(ctx, acc, limit)
+	}
 	if isDomainMail(acc) {
 		return c.listDomainMessages(ctx, acc, limit)
 	}
@@ -262,6 +292,17 @@ func messagesFromGraph(messages []graphMessage, limit int) []Message {
 
 // GetMessage 按消息 ID 拉取单封邮件的完整正文（HTML + 纯文本）。
 func (c *Client) GetMessage(ctx context.Context, acc Account, msgID string) (Message, error) {
+	if isMailCom(acc) {
+		client, err := c.mailComClient(acc)
+		if err != nil {
+			return Message{}, err
+		}
+		message, err := client.GetMessage(ctx, mailcom.Account{Email: acc.Email, Password: acc.Password}, msgID)
+		if err != nil {
+			return Message{}, err
+		}
+		return mailComMessage(message), nil
+	}
 	if isDomainMail(acc) {
 		client, err := c.domainMailClient(acc)
 		if err != nil {
@@ -333,8 +374,71 @@ func (c *Client) GetMessage(ctx context.Context, acc Account, msgID string) (Mes
 	}, nil
 }
 
+func isMailCom(acc Account) bool {
+	return strings.EqualFold(strings.TrimSpace(acc.Provider), mailcom.Provider)
+}
+
 func isDomainMail(acc Account) bool {
 	return strings.EqualFold(strings.TrimSpace(acc.Provider), domainmail.Provider)
+}
+
+func (c *Client) mailComClient(acc Account) (*mailcom.Client, error) {
+	secret := strings.TrimSpace(acc.MailComOAuthPublicSecret)
+	digest := sha256.Sum256([]byte(acc.Password))
+	key := strings.ToLower(strings.TrimSpace(acc.Email)) + "\x00" + hex.EncodeToString(digest[:]) + "\x00" + secret
+	c.mailComMu.Lock()
+	defer c.mailComMu.Unlock()
+	if client, ok := c.mailCom[key]; ok {
+		return client, nil
+	}
+	client, err := mailcom.New(mailcom.Config{OAuthPublicSecret: secret, Timeout: c.http.Timeout}, mailcom.WithHTTPClient(c.http))
+	if err != nil {
+		return nil, err
+	}
+	c.mailCom[key] = client
+	return client, nil
+}
+
+// SupportsRemoteAlias 报告该邮箱的裂变子号是否必须先在远端真实创建。
+// mail.com 不支持 plus 别名，子号地址必须调用网页端设置接口注册后才会收信。
+func SupportsRemoteAlias(acc Account) bool {
+	return isMailCom(acc)
+}
+
+// CreateAlias 在远端为该邮箱创建一个真实的收件地址。
+func (c *Client) CreateAlias(ctx context.Context, acc Account, address string) error {
+	if !isMailCom(acc) {
+		return fmt.Errorf("provider %q 不支持远端别名创建", strings.TrimSpace(acc.Provider))
+	}
+	client, err := c.mailComClient(acc)
+	if err != nil {
+		return err
+	}
+	return client.AddAlias(ctx, mailcom.Account{Email: acc.Email, Password: acc.Password}, address)
+}
+
+// ListAliases 读取该邮箱在远端已存在的收件地址。
+func (c *Client) ListAliases(ctx context.Context, acc Account) ([]string, error) {
+	if !isMailCom(acc) {
+		return nil, fmt.Errorf("provider %q 不支持远端别名读取", strings.TrimSpace(acc.Provider))
+	}
+	client, err := c.mailComClient(acc)
+	if err != nil {
+		return nil, err
+	}
+	return client.ListAliases(ctx, mailcom.Account{Email: acc.Email, Password: acc.Password})
+}
+
+func mailComMessage(message mailcom.Message) Message {
+	return Message{ID: message.ID, From: message.Sender, Subject: message.Subject, ReceivedAt: message.ReceivedAt, Text: message.Body}
+}
+
+func mailComMessages(messages []mailcom.Message) []Message {
+	out := make([]Message, 0, len(messages))
+	for _, message := range messages {
+		out = append(out, mailComMessage(message))
+	}
+	return out
 }
 
 func (c *Client) domainMailClient(acc Account) (*domainmail.Client, error) {
@@ -437,6 +541,16 @@ func (c *Client) fetchCodeAPI(ctx context.Context, acc Account) (Message, error)
 	}
 	code := extractAPICode(body)
 	if code == "" {
+		contentURL := codeAPIContentURL(body, parsed)
+		if contentURL != "" {
+			content, _, contentErr := c.fetchCodeURLBody(ctx, contentURL, "text/html, text/plain, application/json, */*", 1<<20)
+			if contentErr != nil {
+				return Message{}, contentErr
+			}
+			code = extractAPICode(content)
+		}
+	}
+	if code == "" {
 		return Message{}, ErrCodeNotFound
 	}
 	digest := sha256.Sum256([]byte(code))
@@ -448,6 +562,35 @@ func (c *Client) fetchCodeAPI(ctx context.Context, acc Account) (Message, error)
 		ReceivedAt: time.Now(),
 		Text:       code,
 	}, nil
+}
+
+func codeAPIContentURL(body []byte, base *url.URL) string {
+	tokenizer := xhtml.NewTokenizer(bytes.NewReader(body))
+	for {
+		switch tokenizer.Next() {
+		case xhtml.ErrorToken:
+			return ""
+		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
+			token := tokenizer.Token()
+			if !strings.EqualFold(token.Data, "iframe") {
+				continue
+			}
+			for _, attribute := range token.Attr {
+				if !strings.EqualFold(attribute.Key, "src") || strings.TrimSpace(attribute.Val) == "" {
+					continue
+				}
+				reference, err := url.Parse(strings.TrimSpace(attribute.Val))
+				if err != nil {
+					return ""
+				}
+				resolved := base.ResolveReference(reference)
+				if (resolved.Scheme == "http" || resolved.Scheme == "https") && strings.EqualFold(resolved.Host, base.Host) {
+					return resolved.String()
+				}
+				return ""
+			}
+		}
+	}
 }
 
 func (c *Client) fetchCodeURLBody(ctx context.Context, rawURL, accept string, maxBytes int64) ([]byte, string, error) {

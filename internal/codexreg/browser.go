@@ -21,7 +21,12 @@ import (
 // ErrAccountTaken 注册时提示"账号不存在或已被删除/停用"，视为该地址已被注册，不应重试。
 var ErrAccountTaken = errors.New("账号不存在或已被删除/停用")
 
-const registrationSuccessHold = 0 * time.Second
+const (
+	registrationTrialWaitTimeout             = 30 * time.Second
+	registrationTrialPollInterval            = 2 * time.Second
+	registrationTrialIneligibleMinWait       = 12 * time.Second
+	registrationTrialIneligibleConfirmations = 3
+)
 
 func registrationLauncher(headless bool) *launcher.Launcher {
 	return launcher.New().
@@ -152,6 +157,8 @@ func registerBrowser(ctx context.Context, in Input) (token string, err error) {
 	codeReady := false
 	emailAttempts := 1
 	emailSubmittedAt := time.Now()
+	passwordChoiceClicked := false
+	passwordChoiceClickedAt := time.Time{}
 	passwordDone := false
 	passwordSubmittedAt := time.Time{}
 	initialDeadline := time.Now().Add(2 * time.Minute)
@@ -167,6 +174,19 @@ func registerBrowser(ctx context.Context, in Input) (token string, err error) {
 		switch classifyRegistrationPage(signals) {
 		case registrationStateCode, registrationStateCodeRejected:
 			codeReady = true
+		case registrationStatePasswordChoice:
+			if in.RegistrationFlow != RegistrationFlowPassword || passwordDone {
+				codeReady = true
+			} else if !passwordChoiceClicked {
+				in.logf("🔐 已选择密码注册，正在打开创建密码页面")
+				if clickErr := clickRegistrationPasswordSignup(page); clickErr != nil {
+					return "", fmt.Errorf("打开密码注册页面失败: %w", clickErr)
+				}
+				passwordChoiceClicked = true
+				passwordChoiceClickedAt = time.Now()
+			} else if time.Since(passwordChoiceClickedAt) >= 30*time.Second {
+				return "", fmt.Errorf("点击密码注册入口后页面未跳转: %s", registrationPageDiagnostic(signals))
+			}
 		case registrationStateEmail:
 			if time.Since(emailSubmittedAt) >= 3*time.Second {
 				if emailAttempts >= 3 {
@@ -334,7 +354,9 @@ func registerBrowser(ctx context.Context, in Input) (token string, err error) {
 		signals, _ := inspectRegistrationPage(page)
 		return "", fmt.Errorf("等待 ChatGPT 主界面超时: %s", registrationPageDiagnostic(signals))
 	}
-	in.logf("✅ ChatGPT 主界面已就绪，提取 accessToken...")
+	in.logf("✅ ChatGPT 主界面已就绪，正在确认试用状态...")
+	waitRegistrationTrial(ctx, page, in.logf)
+	in.logf("🔑 试用状态确认完成，提取 accessToken...")
 
 	// 7. 导航到 /api/auth/session 读取 accessToken（重置超时，避免沿用已耗尽的预算）
 	page = page.CancelTimeout().Timeout(60 * time.Second)
@@ -351,7 +373,6 @@ func registerBrowser(ctx context.Context, in Input) (token string, err error) {
 		return "", fmt.Errorf("未找到 accessToken，可能未登录成功")
 	}
 	in.logf("🔑 accessToken 获取成功，正在关闭浏览器")
-	waitRegistrationSuccessHold(ctx, registrationSuccessHold)
 	return accessToken, nil
 }
 
@@ -364,37 +385,184 @@ func waitRegistrationSuccessHold(ctx context.Context, duration time.Duration) {
 	}
 }
 
+func waitRegistrationTrial(ctx context.Context, page *rod.Page, logf func(string, ...any)) {
+	startedAt := time.Now()
+	deadline := startedAt.Add(registrationTrialWaitTimeout)
+	ineligibleConfirmations := 0
+	loggedProbeError := false
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return
+		}
+		status, err := probeRegistrationTrial(page)
+		if err != nil {
+			ineligibleConfirmations = 0
+			if !loggedProbeError {
+				logf("试用状态探测暂未完成: %v", err)
+				loggedProbeError = true
+			}
+		} else {
+			loggedProbeError = false
+			switch status {
+			case registrationTrialEligible:
+				logf("🎁 已确认当前账号存在 0 元试用")
+				return
+			case registrationTrialIneligible:
+				ineligibleConfirmations++
+				if registrationTrialStatusSettled(status, time.Since(startedAt), ineligibleConfirmations) {
+					logf("ℹ️ 已确认当前账号没有 0 元试用")
+					return
+				}
+			default:
+				ineligibleConfirmations = 0
+			}
+		}
+		timer := time.NewTimer(registrationTrialPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+	logf("⏱ 试用状态在 %s 内未明确，继续获取 accessToken", registrationTrialWaitTimeout)
+}
+
+func registrationTrialStatusSettled(status registrationTrialStatus, elapsed time.Duration, ineligibleConfirmations int) bool {
+	if status == registrationTrialEligible {
+		return true
+	}
+	return status == registrationTrialIneligible &&
+		elapsed >= registrationTrialIneligibleMinWait &&
+		ineligibleConfirmations >= registrationTrialIneligibleConfirmations
+}
+
+func probeRegistrationTrial(page *rod.Page) (registrationTrialStatus, error) {
+	if page == nil {
+		return registrationTrialPending, fmt.Errorf("页面不存在")
+	}
+	result, err := page.CancelTimeout().Timeout(10 * time.Second).Eval(`async () => {
+		try {
+			const response = await fetch('/backend-api/accounts/check/v4-2023-04-27?timezone_offset_min=0', {
+				credentials: 'include',
+				headers: {Accept: 'application/json'}
+			});
+			return {status: response.status, body: await response.text()};
+		} catch (error) {
+			return {status: 0, body: '', error: String(error)};
+		}
+	}`)
+	if err != nil {
+		return registrationTrialPending, err
+	}
+	var response struct {
+		Status int    `json:"status"`
+		Body   string `json:"body"`
+		Error  string `json:"error"`
+	}
+	if err := result.Value.Unmarshal(&response); err != nil {
+		return registrationTrialPending, err
+	}
+	if response.Error != "" {
+		return registrationTrialPending, errors.New(response.Error)
+	}
+	if response.Status != 200 {
+		return registrationTrialPending, fmt.Errorf("试用状态接口返回 HTTP %d", response.Status)
+	}
+	return classifyRegistrationTrialResponse([]byte(response.Body)), nil
+}
+
+type registrationTrialStatus string
+
+const (
+	registrationTrialPending    registrationTrialStatus = "pending"
+	registrationTrialEligible   registrationTrialStatus = "eligible"
+	registrationTrialIneligible registrationTrialStatus = "ineligible"
+)
+
+func classifyRegistrationTrialResponse(body []byte) registrationTrialStatus {
+	var root map[string]any
+	if json.Unmarshal(body, &root) != nil {
+		return registrationTrialPending
+	}
+	accounts, ok := root["accounts"].(map[string]any)
+	if !ok || len(accounts) == 0 {
+		return registrationTrialPending
+	}
+	seenAccount := false
+	seenCampaigns := false
+	for _, raw := range accounts {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		seenAccount = true
+		campaigns, ok := entry["eligible_promo_campaigns"].(map[string]any)
+		if !ok {
+			continue
+		}
+		seenCampaigns = true
+		plus, _ := campaigns["plus"].(map[string]any)
+		metadata, _ := plus["metadata"].(map[string]any)
+		if registrationTrialMetadataEligible(metadata) {
+			return registrationTrialEligible
+		}
+	}
+	if seenAccount && seenCampaigns {
+		return registrationTrialIneligible
+	}
+	return registrationTrialPending
+}
+
+func registrationTrialMetadataEligible(metadata map[string]any) bool {
+	if metadata == nil {
+		return false
+	}
+	plan, _ := metadata["plan_name"].(string)
+	if !strings.Contains(strings.ToLower(plan), "plus") {
+		return false
+	}
+	discount, _ := metadata["discount"].(map[string]any)
+	percentage, _ := discount["percentage"].(float64)
+	duration, _ := metadata["duration"].(map[string]any)
+	periods, _ := duration["num_periods"].(float64)
+	period, _ := duration["period"].(string)
+	return percentage >= 100 && periods > 0 && strings.Contains("day week month year", strings.ToLower(period))
+}
+
 type registrationPageState string
 
 const (
-	registrationStateWait         registrationPageState = "wait"
-	registrationStateEmail        registrationPageState = "email"
-	registrationStateCode         registrationPageState = "code"
-	registrationStateCodeRejected registrationPageState = "code_rejected"
-	registrationStatePassword     registrationPageState = "password"
-	registrationStateProfile      registrationPageState = "profile"
-	registrationStateReady        registrationPageState = "ready"
-	registrationStateDisabled     registrationPageState = "disabled"
-	registrationStateRetry        registrationPageState = "retry"
+	registrationStateWait           registrationPageState = "wait"
+	registrationStateEmail          registrationPageState = "email"
+	registrationStateCode           registrationPageState = "code"
+	registrationStateCodeRejected   registrationPageState = "code_rejected"
+	registrationStatePasswordChoice registrationPageState = "password_choice"
+	registrationStatePassword       registrationPageState = "password"
+	registrationStateProfile        registrationPageState = "profile"
+	registrationStateReady          registrationPageState = "ready"
+	registrationStateDisabled       registrationPageState = "disabled"
+	registrationStateRetry          registrationPageState = "retry"
 )
 
 type registrationPageSignals struct {
-	URL            string `json:"url"`
-	Title          string `json:"title"`
-	Body           string `json:"body"`
-	HasEmail       bool   `json:"hasEmail"`
-	EmailValue     string `json:"emailValue"`
-	HasCode        bool   `json:"hasCode"`
-	CodeInvalid    bool   `json:"codeInvalid"`
-	HasPassword    bool   `json:"hasPassword"`
-	HasName        bool   `json:"hasName"`
-	NameValue      string `json:"nameValue"`
-	ProfileField   string `json:"profileField"`
-	ProfileValue   string `json:"profileValue"`
-	ProfileInvalid bool   `json:"profileInvalid"`
-	ProfileKey     string `json:"profileKey"`
-	HasReady       bool   `json:"hasReady"`
-	HasRetry       bool   `json:"hasRetry"`
+	URL               string `json:"url"`
+	Title             string `json:"title"`
+	Body              string `json:"body"`
+	HasEmail          bool   `json:"hasEmail"`
+	EmailValue        string `json:"emailValue"`
+	HasCode           bool   `json:"hasCode"`
+	HasPasswordSignup bool   `json:"hasPasswordSignup"`
+	CodeInvalid       bool   `json:"codeInvalid"`
+	HasPassword       bool   `json:"hasPassword"`
+	HasName           bool   `json:"hasName"`
+	NameValue         string `json:"nameValue"`
+	ProfileField      string `json:"profileField"`
+	ProfileValue      string `json:"profileValue"`
+	ProfileInvalid    bool   `json:"profileInvalid"`
+	ProfileKey        string `json:"profileKey"`
+	HasReady          bool   `json:"hasReady"`
+	HasRetry          bool   `json:"hasRetry"`
 }
 
 var (
@@ -423,7 +591,8 @@ func inspectRegistrationPage(page *rod.Page) (registrationPageSignals, error) {
 		const first = selector => Array.from(document.querySelectorAll(selector)).find(visible) || null;
 		const email = first("#email,input[name='email'],input[type='email'],input[autocomplete='email']");
 		const code = first("input[name='code'],input[autocomplete='one-time-code']");
-		const password = first("input[type='password'],input[name='password']");
+		const passwordSignup = first("a[href='/create-account/password'],a[href$='/create-account/password']");
+		const password = first("input[type='password'],input[name='password'],input[name='new-password'],input[autocomplete='new-password']");
 		const name = first("input[name='name'],input[name='fullName'],input[name='full_name'],input[id='name'],input[id='fullName'],input[id='full-name'],input[autocomplete='name'],input[placeholder='Full name'],input[placeholder='Name'],input[placeholder='全名'],input[placeholder='姓名'],input[aria-label='Full name'],input[aria-label='Name'],input[aria-label='全名'],input[aria-label='姓名']");
 		const profile = first("input[name='age'],input[name='birthdate'],input[name='birthday'],input[name='date_of_birth'],input[name='dob'],input[id='age'],input[id*='birth'],input[autocomplete='bday'],input[type='date'],input[placeholder='Age'],input[placeholder='年龄'],input[placeholder='生日'],input[placeholder='出生日期'],input[placeholder='出生年月日'],input[aria-label='Age'],input[aria-label='年龄'],input[aria-label='生日'],input[aria-label='出生日期'],input[aria-label='出生年月日'],input[placeholder='YYYY/MM/DD'],input[placeholder='YYYY-MM-DD'],input[placeholder='MM/DD/YYYY'],input[aria-label='YYYY/MM/DD'],input[aria-label='YYYY-MM-DD'],input[aria-label='MM/DD/YYYY']");
 		const dateGroups = Array.from(document.querySelectorAll("[role='group']")).filter(visible);
@@ -462,6 +631,7 @@ func inspectRegistrationPage(page *rod.Page) (registrationPageSignals, error) {
 			hasEmail: !!email,
 			emailValue: email ? (email.value || '') : '',
 			hasCode: !!code,
+			hasPasswordSignup: !!passwordSignup,
 			codeInvalid: !!code && (code.getAttribute('aria-invalid') === 'true' || /invalid|incorrect|wrong|expired|错误|无效|过期|正しくありません|無効|有効期限/.test(alerts.toLowerCase())),
 			hasPassword: !!password,
 			hasName: !!name,
@@ -499,6 +669,9 @@ func classifyRegistrationPage(signals registrationPageSignals) registrationPageS
 	}
 	if signals.HasCode && (signals.CodeInvalid || registrationCodeRejected(body)) {
 		return registrationStateCodeRejected
+	}
+	if signals.HasCode && signals.HasPasswordSignup {
+		return registrationStatePasswordChoice
 	}
 	if signals.HasCode {
 		return registrationStateCode
@@ -571,6 +744,56 @@ func submitRegistrationEmail(page *rod.Page, email string) error {
 	return nil
 }
 
+func clickRegistrationPasswordSignup(page *rod.Page) error {
+	pg := page.CancelTimeout().Timeout(15 * time.Second)
+	link, err := visibleRegistrationElement(pg, "a[href='/create-account/password'],a[href$='/create-account/password']")
+	if err != nil {
+		return err
+	}
+	href, err := link.Attribute("href")
+	if err != nil || href == nil || strings.TrimSpace(*href) == "" {
+		return fmt.Errorf("密码注册入口缺少目标地址")
+	}
+	info, err := page.Info()
+	if err != nil {
+		return err
+	}
+	target, err := url.Parse(strings.TrimSpace(*href))
+	if err != nil {
+		return err
+	}
+	base, err := url.Parse(info.URL)
+	if err != nil {
+		return err
+	}
+	target = base.ResolveReference(target)
+	if _, err := link.Eval(`() => this.click()`); err != nil {
+		return err
+	}
+	for range 20 {
+		time.Sleep(250 * time.Millisecond)
+		signals, inspectErr := inspectRegistrationPage(page)
+		if inspectErr == nil {
+			current, parseErr := url.Parse(signals.URL)
+			if parseErr == nil && current.Path == "/create-account/password" {
+				return nil
+			}
+		}
+	}
+	if err := page.Navigate(target.String()); err != nil {
+		return err
+	}
+	signals, err := inspectRegistrationPage(page)
+	if err != nil {
+		return err
+	}
+	current, err := url.Parse(signals.URL)
+	if err != nil || current.Path != "/create-account/password" {
+		return fmt.Errorf("密码注册页面未打开")
+	}
+	return nil
+}
+
 func submitRegistrationCode(page *rod.Page, code string) error {
 	code = strings.TrimSpace(code)
 	if code == "" {
@@ -600,7 +823,7 @@ func submitRegistrationCode(page *rod.Page, code string) error {
 
 func submitRegistrationPassword(page *rod.Page, password string) error {
 	pg := page.CancelTimeout().Timeout(15 * time.Second)
-	input, err := visibleRegistrationElement(pg, "input[type='password'],input[name='password']")
+	input, err := visibleRegistrationElement(pg, "input[type='password'],input[name='password'],input[name='new-password'],input[autocomplete='new-password']")
 	if err != nil {
 		return err
 	}

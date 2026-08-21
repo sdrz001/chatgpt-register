@@ -18,9 +18,11 @@ import (
 )
 
 const (
-	userAgent           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
-	BackendRod          = "rod"
-	BackendCloakBrowser = "cloakbrowser"
+	userAgent                 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+	BackendRod                = "rod"
+	BackendCloakBrowser       = "cloakbrowser"
+	RegistrationFlowEmailCode = "email_code"
+	RegistrationFlowPassword  = "password"
 )
 
 var browserRegister = registerBrowser
@@ -34,6 +36,7 @@ type Input struct {
 	Proxy            string // 空=直连
 	Headless         bool
 	Backend          string
+	RegistrationFlow string
 	PythonExecutable string
 	SidecarScript    string
 
@@ -97,6 +100,19 @@ func normalizeBackend(backend string) (string, error) {
 	}
 }
 
+func normalizeRegistrationFlow(flow string) (string, error) {
+	flow = strings.ToLower(strings.TrimSpace(flow))
+	if flow == "" {
+		return RegistrationFlowEmailCode, nil
+	}
+	switch flow {
+	case RegistrationFlowEmailCode, RegistrationFlowPassword:
+		return flow, nil
+	default:
+		return "", fmt.Errorf("不支持的注册流程 %q", flow)
+	}
+}
+
 // Register 完整生产一个账号：浏览器注册 ChatGPT → 取 accessToken → 组装 auth.json。
 // 拿到 AT 即成功；不再调用已失效的 Agent Identity 注册接口。
 func Register(ctx context.Context, in Input) (*Result, error) {
@@ -105,6 +121,11 @@ func Register(ctx context.Context, in Input) (*Result, error) {
 		return nil, err
 	}
 	in.Backend = backend
+	flow, err := normalizeRegistrationFlow(in.RegistrationFlow)
+	if err != nil {
+		return nil, err
+	}
+	in.RegistrationFlow = flow
 	if in.FetchCode == nil {
 		return nil, fmt.Errorf("缺少 FetchCode 回调，无法自动读取验证码")
 	}

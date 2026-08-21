@@ -102,24 +102,24 @@ func migrateLegacyProxyPool(db *gorm.DB) error {
 func backfillRegisterLocations(db *gorm.DB) {
 	var regs []models.Registration
 	if err := db.Select("id", "log", "register_country", "register_ip", "register_city").
-		Where("register_country = ? OR register_country IS NULL", "").
+		Where("(register_country = ? OR register_country IS NULL OR register_ip = ? OR register_ip IS NULL OR register_city = ? OR register_city IS NULL)", "", "", "").
 		Where("log <> ? AND log IS NOT NULL", "").
 		Find(&regs).Error; err != nil {
 		return
 	}
 	for _, reg := range regs {
 		loc := codexreg.ParseRegisterLocation(reg.Log)
-		if loc.Country == "" && loc.IP == "" {
+		if loc.Country == "" && loc.IP == "" && loc.City == "" {
 			continue
 		}
 		updates := map[string]any{}
-		if loc.Country != "" {
+		if loc.Country != "" && strings.TrimSpace(reg.RegisterCountry) == "" {
 			updates["register_country"] = loc.Country
 		}
-		if loc.IP != "" && reg.RegisterIP == "" {
+		if loc.IP != "" && strings.TrimSpace(reg.RegisterIP) == "" {
 			updates["register_ip"] = loc.IP
 		}
-		if loc.City != "" && reg.RegisterCity == "" {
+		if loc.City != "" && strings.TrimSpace(reg.RegisterCity) == "" {
 			updates["register_city"] = loc.City
 		}
 		if len(updates) > 0 {

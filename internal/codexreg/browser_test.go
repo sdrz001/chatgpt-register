@@ -7,6 +7,36 @@ import (
 	"time"
 )
 
+func TestClassifyRegistrationTrialResponse(t *testing.T) {
+	eligible := `{"accounts":{"account":{"eligible_promo_campaigns":{"plus":{"metadata":{"plan_name":"plus","discount":{"percentage":100},"duration":{"num_periods":1,"period":"month"}}}}}}}`
+	if status := classifyRegistrationTrialResponse([]byte(eligible)); status != registrationTrialEligible {
+		t.Fatalf("eligible status=%q", status)
+	}
+	ineligible := `{"accounts":{"account":{"eligible_promo_campaigns":{}}}}`
+	if status := classifyRegistrationTrialResponse([]byte(ineligible)); status != registrationTrialIneligible {
+		t.Fatalf("ineligible status=%q", status)
+	}
+	pending := `{"accounts":{"account":{"account_plan":{"plan_type":"free"}}}}`
+	if status := classifyRegistrationTrialResponse([]byte(pending)); status != registrationTrialPending {
+		t.Fatalf("pending status=%q", status)
+	}
+}
+
+func TestRegistrationTrialStatusSettled(t *testing.T) {
+	if registrationTrialStatusSettled(registrationTrialIneligible, time.Second, 1) {
+		t.Fatal("early ineligible response settled")
+	}
+	if registrationTrialStatusSettled(registrationTrialIneligible, 12*time.Second, 2) {
+		t.Fatal("insufficient ineligible confirmations settled")
+	}
+	if !registrationTrialStatusSettled(registrationTrialIneligible, 12*time.Second, 3) {
+		t.Fatal("stable ineligible response did not settle")
+	}
+	if !registrationTrialStatusSettled(registrationTrialEligible, 0, 0) {
+		t.Fatal("eligible response did not settle immediately")
+	}
+}
+
 func TestRegistrationLauncherLoadsAllResources(t *testing.T) {
 	launcher := registrationLauncher(true)
 	if value := launcher.Get("blink-settings"); value != "" {
@@ -25,6 +55,8 @@ func TestClassifyRegistrationPage(t *testing.T) {
 		{name: "profile birthdate", signals: registrationPageSignals{HasName: true, ProfileField: "birthdate", HasEmail: true}, want: registrationStateProfile},
 		{name: "profile segmented birthdate", signals: registrationPageSignals{HasName: true, ProfileField: "birthdate_segments", ProfileValue: "2026-08-12"}, want: registrationStateProfile},
 		{name: "password", signals: registrationPageSignals{HasPassword: true, HasEmail: true}, want: registrationStatePassword},
+		{name: "password choice", signals: registrationPageSignals{HasCode: true, HasPasswordSignup: true}, want: registrationStatePasswordChoice},
+		{name: "invalid code before password choice", signals: registrationPageSignals{HasCode: true, HasPasswordSignup: true, CodeInvalid: true}, want: registrationStateCodeRejected},
 		{name: "invalid code", signals: registrationPageSignals{HasCode: true, HasEmail: true, Body: "Invalid code"}, want: registrationStateCodeRejected},
 		{name: "invalid Japanese code", signals: registrationPageSignals{HasCode: true, Body: "認証コードが正しくありません"}, want: registrationStateCodeRejected},
 		{name: "code", signals: registrationPageSignals{HasCode: true, HasEmail: true}, want: registrationStateCode},

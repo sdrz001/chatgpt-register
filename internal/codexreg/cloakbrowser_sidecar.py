@@ -41,9 +41,15 @@ except ModuleNotFoundError as exc:
     )
 
 VERSION = 1
+BROWSER_VERSION = "151.0.7922.108.2"
+REGISTRATION_FLOWS = {"email_code", "password"}
 SCREENSHOT_LIMIT = 1 << 20
 LOGIN_URL = "https://chatgpt.com/auth/login"
 SESSION_URL = "https://chatgpt.com/api/auth/session"
+REGISTRATION_TRIAL_WAIT_TIMEOUT = 30.0
+REGISTRATION_TRIAL_POLL_INTERVAL = 2.0
+REGISTRATION_TRIAL_INELIGIBLE_MIN_WAIT = 12.0
+REGISTRATION_TRIAL_INELIGIBLE_CONFIRMATIONS = 3
 EMAIL_RE = re.compile(r"(?i)[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}")
 PROXY_RE = re.compile(r"(?i)(https?|socks5)://[^/@\s]+@")
 JWT_RE = re.compile(r"\b[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\b")
@@ -122,7 +128,10 @@ def validate_start(raw: Mapping[str, Any]) -> dict[str, Any]:
         proxy = ""
     if not isinstance(proxy, str) or not isinstance(payload.get("headless"), bool):
         raise SidecarError("invalid_payload", "payload proxy/headless has invalid type")
-    result.update(proxy=normalize_proxy(proxy), headless=payload["headless"])
+    registration_flow = optional_text(payload, "registration_flow") or "email_code"
+    if registration_flow not in REGISTRATION_FLOWS:
+        raise SidecarError("invalid_payload", "payload.registration_flow is invalid")
+    result.update(proxy=normalize_proxy(proxy), headless=payload["headless"], registration_flow=registration_flow)
     result.update(locale=optional_text(payload, "locale"), timezone=optional_text(payload, "timezone"))
     return result
 
@@ -274,7 +283,11 @@ def scaled_clip(size: Mapping[str, Any], factor: float) -> dict[str, int]:
 
 
 async def launch_context(registration: Registration, profile: Path) -> Any:
-    options: dict[str, Any] = {"headless": registration.payload["headless"], "humanize": True}
+    options: dict[str, Any] = {
+        "headless": registration.payload["headless"],
+        "humanize": True,
+        "browser_version": BROWSER_VERSION,
+    }
     if registration.payload["proxy"]:
         options.update(proxy=registration.payload["proxy"], geoip=True)
     if registration.payload.get("locale"):
@@ -329,7 +342,9 @@ async def browse(registration: Registration) -> str:
         await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=120000)
         await registration.log("registration page loaded")
         page = await registration.registration_loop(context)
-        await registration.log("login detected; reading session in current page")
+        await registration.log("login detected; confirming trial status")
+        await wait_registration_trial(page, registration.log)
+        await registration.log("trial status check finished; reading session")
         token = await read_access_token(page, registration.log)
         registration.secrets.append(token)
         await registration.log("session token acquired")
@@ -351,7 +366,7 @@ async def close_context(registration: Registration) -> None:
     if context is None:
         return
     close_task = asyncio.create_task(context.close())
-    done, _ = await asyncio.wait((close_task,), timeout=1.0)
+    done, _ = await asyncio.wait((close_task,), timeout=10.0)
     if not done:
         close_task.cancel()
         await asyncio.gather(close_task, return_exceptions=True)
@@ -362,6 +377,133 @@ async def close_context(registration: Registration) -> None:
     except BaseException as exc:
         if not isinstance(exc, asyncio.CancelledError):
             diagnostic("context close failed", exc, registration.secrets)
+
+
+async def wait_registration_trial(
+    page: Any,
+    log: Optional[Callable[[str], Awaitable[None]]] = None,
+) -> None:
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    deadline = started_at + REGISTRATION_TRIAL_WAIT_TIMEOUT
+    ineligible_confirmations = 0
+    logged_error = False
+    while loop.time() < deadline:
+        status, error = await probe_registration_trial(page)
+        if error:
+            ineligible_confirmations = 0
+            if log is not None and not logged_error:
+                await log(f"trial status not ready: {error}")
+            logged_error = True
+        else:
+            logged_error = False
+            if status == "eligible":
+                if log is not None:
+                    await log("trial status confirmed: eligible for 0-dollar trial")
+                return
+            if status == "ineligible":
+                ineligible_confirmations += 1
+                if registration_trial_status_settled(
+                    status,
+                    loop.time() - started_at,
+                    ineligible_confirmations,
+                ):
+                    if log is not None:
+                        await log("trial status confirmed: no 0-dollar trial")
+                    return
+            else:
+                ineligible_confirmations = 0
+        await asyncio.sleep(REGISTRATION_TRIAL_POLL_INTERVAL)
+    if log is not None:
+        await log(
+            f"trial status unresolved after {REGISTRATION_TRIAL_WAIT_TIMEOUT:.0f}s; continuing to session"
+        )
+
+
+def registration_trial_status_settled(
+    status: str,
+    elapsed: float,
+    ineligible_confirmations: int,
+) -> bool:
+    if status == "eligible":
+        return True
+    return (
+        status == "ineligible"
+        and elapsed >= REGISTRATION_TRIAL_INELIGIBLE_MIN_WAIT
+        and ineligible_confirmations >= REGISTRATION_TRIAL_INELIGIBLE_CONFIRMATIONS
+    )
+
+
+async def probe_registration_trial(page: Any) -> tuple[str, str]:
+    try:
+        result = await page.evaluate(
+            """async () => {
+                try {
+                    const response = await fetch(
+                        '/backend-api/accounts/check/v4-2023-04-27?timezone_offset_min=0',
+                        {credentials: 'include', headers: {Accept: 'application/json'}}
+                    );
+                    return {status: response.status, body: await response.text(), error: ''};
+                } catch (error) {
+                    return {status: 0, body: '', error: String(error)};
+                }
+            }"""
+        )
+    except Exception as exc:
+        return "pending", type(exc).__name__
+    if not isinstance(result, dict):
+        return "pending", "invalid probe result"
+    error = str(result.get("error") or "")
+    if error:
+        return "pending", error
+    if result.get("status") != 200:
+        return "pending", f"HTTP {result.get('status', 0)}"
+    return classify_registration_trial_response(result.get("body", "")), ""
+
+
+def classify_registration_trial_response(body: str) -> str:
+    try:
+        root = json.loads(body)
+    except (TypeError, json.JSONDecodeError):
+        return "pending"
+    if not isinstance(root, dict) or not isinstance(root.get("accounts"), dict):
+        return "pending"
+    seen_account = False
+    seen_campaigns = False
+    for entry in root["accounts"].values():
+        if not isinstance(entry, dict):
+            continue
+        seen_account = True
+        campaigns = entry.get("eligible_promo_campaigns")
+        if not isinstance(campaigns, dict):
+            continue
+        seen_campaigns = True
+        plus = campaigns.get("plus")
+        metadata = plus.get("metadata") if isinstance(plus, dict) else None
+        if registration_trial_metadata_eligible(metadata):
+            return "eligible"
+    if seen_account and seen_campaigns:
+        return "ineligible"
+    return "pending"
+
+
+def registration_trial_metadata_eligible(metadata: Any) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    plan = str(metadata.get("plan_name") or "").lower()
+    if "plus" not in plan:
+        return False
+    discount = metadata.get("discount")
+    duration = metadata.get("duration")
+    if not isinstance(discount, dict) or not isinstance(duration, dict):
+        return False
+    try:
+        percentage = float(discount.get("percentage", 0))
+        periods = float(duration.get("num_periods", 0))
+    except (TypeError, ValueError):
+        return False
+    period = str(duration.get("period") or "").lower()
+    return percentage >= 100 and periods > 0 and period in {"day", "week", "month", "year"}
 
 
 async def read_access_token(page: Any, log: Optional[Callable[[str], Awaitable[None]]] = None) -> str:

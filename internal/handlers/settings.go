@@ -20,25 +20,28 @@ var reservedSettingKeys = map[string]bool{
 	"sms_api_key_configured":         true,
 	"sub2api_api_key_configured":     true,
 	"domain_mail_api_key_configured": true,
+	"mail_com_oauth_configured":      true,
 	"proxy_enabled":                  true,
 	"proxy_list":                     true,
 }
 
 var secretSettingKeys = map[string]string{
-	"sms_api_key":         "sms_api_key_configured",
-	"sub2api_api_key":     "sub2api_api_key_configured",
-	"domain_mail_api_key": "domain_mail_api_key_configured",
+	"sms_api_key":                  "sms_api_key_configured",
+	"sub2api_api_key":              "sub2api_api_key_configured",
+	"domain_mail_api_key":          "domain_mail_api_key_configured",
+	"mail_com_oauth_public_secret": "mail_com_oauth_configured",
 }
 
 var allowedSettingKeys = map[string]bool{
 	"max_concurrency": true, "fission_count": true, "headless": true, "at_auto_check": true,
-	"browser_backend": true, "python_executable": true,
+	"browser_backend": true, "registration_flow": true, "python_executable": true,
 	"codex_auto_authorize": true, "sms_platform": true, "sms_api_key": true,
 	"sms_country": true, "sms_random_countries": true, "sms_max_price": true, "sms_timeout": true, "sms_phone_attempts": true,
 	"sub2api_auto_import": true, "sub2api_url": true, "sub2api_api_key": true,
 	"sub2api_group_ids": true, "sub2api_concurrency": true, "sub2api_priority": true, "sub2api_timeout": true,
 	"mailbox_source": true, "domain_mail_url": true, "domain_mail_api_key": true,
 	"domain_mail_domain": true, "domain_mail_expiry_time": true,
+	"mail_com_oauth_public_secret": true,
 }
 
 func (h *Handler) SettingsGet(c *gin.Context) {
@@ -72,6 +75,9 @@ func (h *Handler) SettingsGet(c *gin.Context) {
 	}
 	if strings.TrimSpace(out["browser_backend"]) == "" {
 		out["browser_backend"] = "rod"
+	}
+	if strings.TrimSpace(out["registration_flow"]) == "" {
+		out["registration_flow"] = "email_code"
 	}
 	if strings.TrimSpace(out["mailbox_source"]) == "" {
 		out["mailbox_source"] = "import"
@@ -142,6 +148,9 @@ func validateSettings(values integrationcfg.Values, updates map[string]string) e
 	}
 	if backend, changed := updates["browser_backend"]; changed && backend != "rod" && backend != "cloakbrowser" {
 		return fmt.Errorf("browser_backend 必须是 rod 或 cloakbrowser")
+	}
+	if flow, changed := updates["registration_flow"]; changed && flow != "email_code" && flow != "password" {
+		return fmt.Errorf("registration_flow 必须是 email_code 或 password")
 	}
 	if python, changed := updates["python_executable"]; changed {
 		if len(python) > 1024 {

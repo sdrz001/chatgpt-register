@@ -27,6 +27,7 @@ import (
 	"chatgpt-register/internal/domainmail"
 	"chatgpt-register/internal/emailalias"
 	"chatgpt-register/internal/integrationcfg"
+	"chatgpt-register/internal/mailcom"
 	"chatgpt-register/internal/mailfetch"
 	"chatgpt-register/internal/models"
 	"chatgpt-register/internal/smsactivate"
@@ -58,6 +59,7 @@ type Config struct {
 	FissionCount     int
 	Headless         bool
 	BrowserBackend   string
+	RegistrationFlow string
 	PythonExecutable string
 	Proxies          []string // 代理池，按账户轮转；空=直连
 }
@@ -99,6 +101,7 @@ type registrationAttempt struct {
 type mailClient interface {
 	ListMessages(context.Context, mailfetch.Account, int) ([]mailfetch.Message, error)
 	GetMessage(context.Context, mailfetch.Account, string) (mailfetch.Message, error)
+	CreateAlias(context.Context, mailfetch.Account, string) error
 }
 
 // Producer 单例，管理一次生产任务的生命周期与进度。
@@ -106,9 +109,11 @@ type Producer struct {
 	db   *gorm.DB
 	mail mailClient
 
-	mu     sync.Mutex
-	prog   Progress
-	cancel context.CancelFunc
+	mu   sync.Mutex
+	prog Progress
+	// aliasQuotaExhausted 记录本次运行中别名配额已满的邮箱，避免反复申请被 mail.com 拒绝。
+	aliasQuotaExhausted map[uint]struct{}
+	cancel              context.CancelFunc
 
 	claimMu  sync.Mutex      // 串行化任务领取
 	inflight map[string]uint // email -> mailboxID，正在处理中的任务
@@ -384,12 +389,15 @@ func (p *Producer) nextJob(cfg Config, scope Scope) (models.Mailbox, string, boo
 		if !p.isRegistered(mb.Email) {
 			continue
 		}
+		if p.aliasQuotaFull(mb.ID) {
+			continue
+		}
 		alias := p.retryableFissionEmail(mb)
 		if alias == "" {
 			if p.fissionCount(mb) >= cfg.FissionCount {
 				continue
 			}
-			alias = p.nextFissionEmail(mb.Email)
+			alias = p.nextFissionEmail(mb)
 		}
 		if alias == "" || !p.registrationAttemptReady(alias) {
 			continue
@@ -403,14 +411,30 @@ func (p *Producer) nextJob(cfg Config, scope Scope) (models.Mailbox, string, boo
 // produceOne 完整生产一个账号：注册 ChatGPT → 获取 accessToken → 入库。
 func mailAccount(mailbox models.Mailbox) mailfetch.Account {
 	return mailfetch.Account{
-		Email: mailbox.Email, Provider: mailbox.Provider, ClientID: mailbox.ClientID,
+		Email: mailbox.Email, Password: mailbox.Password, Provider: mailbox.Provider, ClientID: mailbox.ClientID,
 		RefreshToken: mailbox.RefreshToken, CodeURL: mailbox.CodeURL, RemoteMailboxID: mailbox.RemoteMailboxID,
 	}
 }
 
 func (p *Producer) mailAccount(mailbox models.Mailbox) (mailfetch.Account, error) {
 	account := mailAccount(mailbox)
-	if !strings.EqualFold(strings.TrimSpace(mailbox.Provider), domainmail.Provider) {
+	provider := strings.TrimSpace(mailbox.Provider)
+	if strings.EqualFold(provider, mailcom.Provider) {
+		if p.db == nil {
+			return account, fmt.Errorf("mail.com 数据库未初始化")
+		}
+		values, err := integrationcfg.Load(p.db)
+		if err != nil {
+			return account, fmt.Errorf("加载 mail.com 设置: %w", err)
+		}
+		config, err := values.MailCom()
+		if err != nil {
+			return account, err
+		}
+		account.MailComOAuthPublicSecret = config.OAuthPublicSecret
+		return account, nil
+	}
+	if !strings.EqualFold(provider, domainmail.Provider) {
 		return account, nil
 	}
 	if p.db == nil {
@@ -430,7 +454,7 @@ func (p *Producer) mailAccount(mailbox models.Mailbox) (mailfetch.Account, error
 }
 
 func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox, email string, isMother bool) error {
-	password := codexreg.GenPassword(16)
+	password := p.registrationPassword(email)
 	accountProxy := p.nextProxy(cfg)
 	exit := codexreg.ExitLocation{}
 	if cfg.BrowserBackend == codexreg.BackendCloakBrowser {
@@ -443,6 +467,9 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 	note := ""
 	if !isMother {
 		note = "裂变(" + mb.Email + ")"
+		if err := p.ensureRemoteAlias(ctx, mb, email); err != nil {
+			return err
+		}
 	}
 	p.upsert(models.Registration{
 		Email: email, MailboxID: mb.ID, Password: password, Proxy: accountProxy,
@@ -501,6 +528,7 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 		}
 	}
 	appendLog("浏览器后端: " + cfg.BrowserBackend)
+	appendLog("注册流程: " + cfg.RegistrationFlow)
 	if line := codexreg.FormatExitLocation(exit); line != "" {
 		appendLog(line)
 	}
@@ -510,6 +538,7 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 		Proxy:            accountProxy,
 		Headless:         cfg.Headless,
 		Backend:          cfg.BrowserBackend,
+		RegistrationFlow: cfg.RegistrationFlow,
 		PythonExecutable: cfg.PythonExecutable,
 		Log: func(f string, a ...any) {
 			msg := fmt.Sprintf(f, a...)
@@ -745,10 +774,56 @@ func (p *Producer) retryableFissionEmail(mailbox models.Mailbox) string {
 	return ""
 }
 
-func (p *Producer) nextFissionEmail(base string) string {
+// ensureRemoteAlias 为需要远端注册的 provider 真实创建裂变子号地址。
+// plus 别名类邮箱直接返回；mail.com 必须先在网页端设置里创建地址，否则该地址收不到邮件。
+func (p *Producer) ensureRemoteAlias(ctx context.Context, mailbox models.Mailbox, alias string) error {
+	account, err := p.mailAccount(mailbox)
+	if err != nil {
+		return err
+	}
+	if !mailfetch.SupportsRemoteAlias(account) {
+		return nil
+	}
+	if err := p.mail.CreateAlias(ctx, account, alias); err != nil {
+		if errors.Is(err, mailcom.ErrAliasLimit) {
+			p.markAliasQuotaExhausted(mailbox.ID)
+			p.logf("⚠️ 邮箱 %s 别名配额已满，停止继续裂变: %v", mailbox.Email, err)
+		}
+		return fmt.Errorf("创建裂变邮箱地址 %s: %w", alias, err)
+	}
+	p.logf("已在 mail.com 创建裂变邮箱地址 %s", alias)
+	return nil
+}
+
+func (p *Producer) markAliasQuotaExhausted(mailboxID uint) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.aliasQuotaExhausted == nil {
+		p.aliasQuotaExhausted = make(map[uint]struct{})
+	}
+	p.aliasQuotaExhausted[mailboxID] = struct{}{}
+}
+
+func (p *Producer) aliasQuotaFull(mailboxID uint) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, exhausted := p.aliasQuotaExhausted[mailboxID]
+	return exhausted
+}
+
+// nextFissionEmail 生成一个未被占用的裂变候选地址。
+// mail.com 不支持 plus 别名，必须使用独立的 local part，并在注册前于远端真实创建。
+func (p *Producer) nextFissionEmail(mailbox models.Mailbox) string {
+	base := mailbox.Email
+	remoteAlias := strings.EqualFold(strings.TrimSpace(mailbox.Provider), mailcom.Provider)
 	for range 999 {
-		email := emailalias.Address(base, emailalias.RandomSuffix(8))
-		if email == base {
+		var email string
+		if remoteAlias {
+			email = mailcom.AliasAddress(base, mailcom.RandomAliasSuffix())
+		} else {
+			email = emailalias.Address(base, emailalias.RandomSuffix(8))
+		}
+		if email == "" || email == base {
 			return ""
 		}
 		p.mu.Lock()
@@ -770,6 +845,16 @@ func (p *Producer) registrationExists(email string) bool {
 	return n > 0
 }
 
+func (p *Producer) registrationPassword(email string) string {
+	var registration models.Registration
+	if err := p.db.Select("password").Where("email = ?", email).First(&registration).Error; err == nil {
+		if password := strings.TrimSpace(registration.Password); password != "" {
+			return password
+		}
+	}
+	return codexreg.GenPassword(16)
+}
+
 // ---- DB / 设置 ----
 
 func (p *Producer) loadConfig() Config {
@@ -777,11 +862,16 @@ func (p *Producer) loadConfig() Config {
 	if browserBackend == "" {
 		browserBackend = codexreg.BackendRod
 	}
+	registrationFlow := p.getSetting("registration_flow")
+	if registrationFlow == "" {
+		registrationFlow = codexreg.RegistrationFlowEmailCode
+	}
 	cfg := Config{
 		MaxConcurrency:   atoiDefault(p.getSetting("max_concurrency"), defaultMaxConcurrency),
 		FissionCount:     atoiDefault(p.getSetting("fission_count"), defaultFissionCount),
 		Headless:         p.getSetting("headless") != "0", // 默认无头，仅当设置为 "0" 时才有头
 		BrowserBackend:   browserBackend,
+		RegistrationFlow: registrationFlow,
 		PythonExecutable: p.getSetting("python_executable"),
 	}
 	if cfg.MaxConcurrency < 1 {

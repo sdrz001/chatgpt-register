@@ -38,6 +38,7 @@ class ProtocolTests(unittest.TestCase):
         parsed = sidecar.parse_message(json.dumps(raw).encode())
         payload = sidecar.validate_start(parsed)
         self.assertEqual(payload["email"], "person@example.test")
+        self.assertEqual(payload["registration_flow"], "email_code")
         self.assertTrue(payload["headless"])
 
     def test_validate_and_normalize_start_proxy(self):
@@ -55,6 +56,21 @@ class ProtocolTests(unittest.TestCase):
         payload = sidecar.validate_start(raw)
         self.assertEqual(payload["age"], "1990-05-06")
         self.assertEqual(payload["proxy"], "http://user:pass@proxy.test:8080")
+
+    def test_start_accepts_password_registration_flow(self):
+        raw = {
+            "type": "start",
+            "payload": {
+                "email": "person@example.test", "password": "secret",
+                "full_name": "Test User", "age": "25", "proxy": "",
+                "headless": True, "registration_flow": "password",
+            },
+        }
+        self.assertEqual(sidecar.validate_start(raw)["registration_flow"], "password")
+        raw["payload"]["registration_flow"] = "other"
+        with self.assertRaises(sidecar.SidecarError) as caught:
+            sidecar.validate_start(raw)
+        self.assertEqual(caught.exception.code, "invalid_payload")
 
     def test_protocol_rejects_invalid_envelopes(self):
         cases = [
@@ -141,7 +157,10 @@ class LaunchTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(sidecar, "load_launcher", return_value=launcher):
             result = await sidecar.launch_context(registration, Path("profile"))
         self.assertIs(result, context)
-        launcher.assert_awaited_once_with("profile", headless=False, humanize=True)
+        launcher.assert_awaited_once_with(
+            "profile", headless=False, humanize=True,
+            browser_version=sidecar.BROWSER_VERSION
+        )
 
     async def test_launch_context_keeps_proxy_geoip_with_humanize(self):
         payload = {
@@ -156,6 +175,7 @@ class LaunchTests(unittest.IsolatedAsyncioTestCase):
             await sidecar.launch_context(registration, Path("profile"))
         launcher.assert_awaited_once_with(
             "profile", headless=True, humanize=True,
+            browser_version=sidecar.BROWSER_VERSION,
             proxy="http://proxy.example.test:8080", geoip=True
         )
 
@@ -174,6 +194,7 @@ class LaunchTests(unittest.IsolatedAsyncioTestCase):
             await sidecar.launch_context(registration, Path("profile"))
         launcher.assert_awaited_once_with(
             "profile", headless=True, humanize=True,
+            browser_version=sidecar.BROWSER_VERSION,
             proxy="http://proxy.example.test:8080", geoip=True,
             locale="pt-BR", timezone="America/Sao_Paulo"
         )
@@ -191,7 +212,10 @@ class LaunchTests(unittest.IsolatedAsyncioTestCase):
         launcher = mock.AsyncMock(return_value=object())
         with mock.patch.object(sidecar, "load_launcher", return_value=launcher):
             await sidecar.launch_context(registration, Path("profile"))
-        launcher.assert_awaited_once_with("profile", headless=True, humanize=True)
+        launcher.assert_awaited_once_with(
+            "profile", headless=True, humanize=True,
+            browser_version=sidecar.BROWSER_VERSION
+        )
 
 
 class ConversionTests(unittest.TestCase):
@@ -258,7 +282,7 @@ class BrazilianPortugueseTests(unittest.TestCase):
 class ClassificationTests(unittest.TestCase):
     def test_poll_interval_adapts_to_page_state(self):
         flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
-        for state in ("email", "password", "profile", "code", "code_rejected", "retry", "ready"):
+        for state in ("email", "password_choice", "password", "profile", "code", "code_rejected", "retry", "ready"):
             with self.subTest(state=state):
                 self.assertEqual(flow_module.poll_interval(state), 0.25)
         self.assertEqual(flow_module.poll_interval("wait"), 0.5)
@@ -289,6 +313,9 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(sidecar.classify_page(base), "password")
         base.password = False
         self.assertEqual(sidecar.classify_page(base), "code_rejected")
+        base.code_invalid = False
+        base.password_signup = True
+        self.assertEqual(sidecar.classify_page(base), "password_choice")
 
     def test_disabled_and_localized_challenge_text(self):
         self.assertEqual(sidecar.classify_page(sidecar.Signals(body="账号已停用")), "disabled")
@@ -860,6 +887,85 @@ class PasswordFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.code, "password_stalled")
 
 
+class PasswordChoiceFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_password_flow_opens_structural_signup_link(self):
+        flow = sidecar.RegistrationFlow(
+            {"registration_flow": "password"}, mock.AsyncMock(), mock.AsyncMock()
+        )
+        page = mock.MagicMock()
+        page.url = "https://auth.openai.com/email-verification"
+        link = mock.AsyncMock()
+        link.get_attribute.return_value = "/create-account/password"
+        link.evaluate.side_effect = lambda _: setattr(
+            page, "url", "https://auth.openai.com/create-account/password"
+        )
+        page.locator.return_value.first = link
+        with mock.patch.object(
+            sys.modules[sidecar.RegistrationFlow.__module__], "monotonic_time", return_value=1.0
+        ):
+            await flow._step(page, sidecar.Signals(code=True, password_signup=True), "password_choice", 1.0)
+        page.locator.assert_called_once_with(
+            sys.modules[sidecar.RegistrationFlow.__module__].PASSWORD_SIGNUP
+        )
+        link.wait_for.assert_awaited_once_with(state="visible", timeout=10000)
+        link.get_attribute.assert_awaited_once_with("href")
+        link.evaluate.assert_awaited_once_with("element => element.click()")
+        page.goto.assert_not_called()
+
+    async def test_password_flow_follows_href_when_click_does_not_navigate(self):
+        flow = sidecar.RegistrationFlow(
+            {"registration_flow": "password"}, mock.AsyncMock(), mock.AsyncMock()
+        )
+        page = mock.MagicMock()
+        page.url = "https://auth.openai.com/email-verification"
+        page.goto = mock.AsyncMock(
+            side_effect=lambda url, **_: setattr(page, "url", url)
+        )
+        link = mock.AsyncMock()
+        link.get_attribute.return_value = "/create-account/password"
+        page.locator.return_value.first = link
+        flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        with mock.patch.object(flow_module, "monotonic_time", return_value=1.0), mock.patch.object(
+            flow_module.asyncio, "sleep", new=mock.AsyncMock()
+        ):
+            await flow._step(page, sidecar.Signals(code=True, password_signup=True), "password_choice", 1.0)
+        page.goto.assert_awaited_once_with(
+            "https://auth.openai.com/create-account/password",
+            wait_until="domcontentloaded", timeout=30000,
+        )
+
+    async def test_email_code_flow_reads_code_without_clicking_password_link(self):
+        request_code = mock.AsyncMock(return_value="123456")
+        flow = sidecar.RegistrationFlow(
+            {"registration_flow": "email_code"}, request_code, mock.AsyncMock()
+        )
+        page = mock.MagicMock()
+        with mock.patch.object(
+            sys.modules[sidecar.RegistrationFlow.__module__], "fill_value", new=mock.AsyncMock()
+        ), mock.patch.object(
+            sys.modules[sidecar.RegistrationFlow.__module__], "click_submit", new=mock.AsyncMock()
+        ):
+            await flow._step(page, sidecar.Signals(code=True, password_signup=True), "password_choice", 1.0)
+        request_code.assert_awaited_once_with(1)
+        page.locator.assert_not_called()
+
+    async def test_password_flow_reads_code_after_password_submission(self):
+        request_code = mock.AsyncMock(return_value="123456")
+        flow = sidecar.RegistrationFlow(
+            {"registration_flow": "password"}, request_code, mock.AsyncMock()
+        )
+        flow.password.mark(0.5)
+        page = mock.MagicMock()
+        with mock.patch.object(
+            sys.modules[sidecar.RegistrationFlow.__module__], "fill_value", new=mock.AsyncMock()
+        ), mock.patch.object(
+            sys.modules[sidecar.RegistrationFlow.__module__], "click_submit", new=mock.AsyncMock()
+        ):
+            await flow._step(page, sidecar.Signals(code=True, password_signup=True), "password_choice", 1.0)
+        request_code.assert_awaited_once_with(1)
+        page.locator.assert_not_called()
+
+
 class ChallengeFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_transient_challenge_waits_and_then_clears(self):
         flow = sidecar.RegistrationFlow({}, mock.AsyncMock(), mock.AsyncMock())
@@ -1146,6 +1252,34 @@ class VerificationFlowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):
+    def test_classify_registration_trial_response(self):
+        eligible = json.dumps({
+            "accounts": {
+                "account": {
+                    "eligible_promo_campaigns": {
+                        "plus": {
+                            "metadata": {
+                                "plan_name": "plus",
+                                "discount": {"percentage": 100},
+                                "duration": {"num_periods": 1, "period": "month"},
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        self.assertEqual(sidecar.classify_registration_trial_response(eligible), "eligible")
+        ineligible = json.dumps({"accounts": {"account": {"eligible_promo_campaigns": {}}}})
+        self.assertEqual(sidecar.classify_registration_trial_response(ineligible), "ineligible")
+        pending = json.dumps({"accounts": {"account": {"account_plan": {"plan_type": "free"}}}})
+        self.assertEqual(sidecar.classify_registration_trial_response(pending), "pending")
+
+    def test_registration_trial_status_settled(self):
+        self.assertFalse(sidecar.registration_trial_status_settled("ineligible", 1.0, 1))
+        self.assertFalse(sidecar.registration_trial_status_settled("ineligible", 12.0, 2))
+        self.assertTrue(sidecar.registration_trial_status_settled("ineligible", 12.0, 3))
+        self.assertTrue(sidecar.registration_trial_status_settled("eligible", 0.0, 0))
+
     def session_page(self, responses, bodies):
         page = mock.MagicMock()
         page.goto = mock.AsyncMock(side_effect=responses)
@@ -1199,6 +1333,8 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         context.pages = [login_page]
         registration.registration_loop = mock.AsyncMock(return_value=login_page)
         with mock.patch.object(sidecar, "launch_context", new=mock.AsyncMock(return_value=context)), mock.patch.object(
+            sidecar, "wait_registration_trial", new=mock.AsyncMock()
+        ), mock.patch.object(
             sidecar, "read_access_token", new=mock.AsyncMock(return_value="header.payload.signature")
         ) as read_token, mock.patch.object(
             sidecar, "close_context", new=mock.AsyncMock()
@@ -1208,8 +1344,12 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         registration.registration_loop.assert_awaited_once_with(context)
         read_token.assert_awaited_once_with(login_page, registration.log)
         self.assertEqual(
+            registration.log.await_args_list[-3],
+            mock.call("login detected; confirming trial status"),
+        )
+        self.assertEqual(
             registration.log.await_args_list[-2],
-            mock.call("login detected; reading session in current page"),
+            mock.call("trial status check finished; reading session"),
         )
 
     async def test_browser_exception_still_emits_screenshot(self):

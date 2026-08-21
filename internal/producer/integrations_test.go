@@ -29,6 +29,8 @@ const (
 type fakeMailClient struct {
 	list func(context.Context, mailfetch.Account, int) ([]mailfetch.Message, error)
 	get  func(context.Context, mailfetch.Account, string) (mailfetch.Message, error)
+
+	createAlias func(context.Context, mailfetch.Account, string) error
 }
 
 func (f fakeMailClient) ListMessages(ctx context.Context, account mailfetch.Account, limit int) ([]mailfetch.Message, error) {
@@ -36,6 +38,13 @@ func (f fakeMailClient) ListMessages(ctx context.Context, account mailfetch.Acco
 		return []mailfetch.Message{}, nil
 	}
 	return f.list(ctx, account, limit)
+}
+
+func (f fakeMailClient) CreateAlias(ctx context.Context, account mailfetch.Account, address string) error {
+	if f.createAlias == nil {
+		return nil
+	}
+	return f.createAlias(ctx, account, address)
 }
 
 func (f fakeMailClient) GetMessage(ctx context.Context, account mailfetch.Account, id string) (mailfetch.Message, error) {
