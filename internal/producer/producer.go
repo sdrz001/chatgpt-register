@@ -279,11 +279,16 @@ func (p *Producer) run(ctx context.Context, target int, scope Scope) {
 				} else {
 					// 记为失败态；若后续重试成功会被 markSuccess 清除
 					p.markFailed(email)
-					attempt, exhausted := p.scheduleRegistrationRetry(email)
-					if exhausted {
-						p.logf("✗ %s 注册失败：%v；本轮已尝试 %d 次，跳过该地址", mask(email), err, attempt)
+					if retryable, known := codexreg.Retryable(err); known && !retryable {
+						p.exhaustRegistrationRetry(email)
+						p.logf("✗ %s 注册失败：%v；该错误不再重试", mask(email), err)
 					} else {
-						p.logf("✗ %s 注册失败：%v；稍后进行第 %d/%d 次尝试", mask(email), err, attempt+1, registrationMaxAttempts)
+						attempt, exhausted := p.scheduleRegistrationRetry(email)
+						if exhausted {
+							p.logf("✗ %s 注册失败：%v；本轮已尝试 %d 次，跳过该地址", mask(email), err, attempt)
+						} else {
+							p.logf("✗ %s 注册失败：%v；稍后进行第 %d/%d 次尝试", mask(email), err, attempt+1, registrationMaxAttempts)
+						}
 					}
 				}
 			} else {
@@ -341,6 +346,15 @@ func (p *Producer) scheduleRegistrationRetry(email string) (int, bool) {
 	}
 	p.attempts[email] = attempt
 	return attempt.count, attempt.exhausted
+}
+
+func (p *Producer) exhaustRegistrationRetry(email string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.attempts == nil {
+		p.attempts = map[string]registrationAttempt{}
+	}
+	p.attempts[email] = registrationAttempt{count: registrationMaxAttempts, exhausted: true}
 }
 
 func waitProducer(ctx context.Context, duration time.Duration) bool {

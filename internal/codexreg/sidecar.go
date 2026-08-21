@@ -66,7 +66,24 @@ type sidecarMessage struct {
 	Code        string `json:"code,omitempty"`
 	Data        string `json:"data,omitempty"`
 	AccessToken string `json:"access_token,omitempty"`
+	Retryable   *bool  `json:"retryable,omitempty"`
 }
+
+type sidecarProtocolError struct {
+	code           string
+	message        string
+	retryable      bool
+	retryableKnown bool
+}
+
+func (e *sidecarProtocolError) Error() string {
+	if e.code == "" {
+		return e.message
+	}
+	return e.code + ": " + e.message
+}
+
+func (e *sidecarProtocolError) Retryable() bool { return e.retryable }
 
 type limitedBuffer struct {
 	buf       bytes.Buffer
@@ -234,10 +251,14 @@ func (s *sidecarSession) sidecarError(message sidecarMessage) error {
 	if text == "" {
 		text = "CloakBrowser sidecar 返回错误"
 	}
-	if message.Code != "" {
-		return fmt.Errorf("%s: %s", message.Code, text)
+	retryable := false
+	if message.Retryable != nil {
+		retryable = *message.Retryable
 	}
-	return errors.New(text)
+	return &sidecarProtocolError{
+		code: message.Code, message: text, retryable: retryable,
+		retryableKnown: message.Retryable != nil,
+	}
 }
 
 func (s *sidecarSession) run() (bool, error) {
@@ -446,6 +467,17 @@ func sidecarFailure(err error, stderr string, in Input, code, token string) erro
 	stderr = strings.TrimSpace(redactSensitive(stderr, in, code, token))
 	if stderr != "" {
 		message += "; sidecar stderr: " + stderr
+	}
+	var protocolErr *sidecarProtocolError
+	if errors.As(err, &protocolErr) {
+		protocolMessage := redactSensitive(strings.ToValidUTF8(protocolErr.message, "�"), in, code, token)
+		if stderr != "" {
+			protocolMessage += "; sidecar stderr: " + stderr
+		}
+		return &sidecarProtocolError{
+			code: protocolErr.code, message: protocolMessage, retryable: protocolErr.retryable,
+			retryableKnown: protocolErr.retryableKnown,
+		}
 	}
 	return errors.New(message)
 }

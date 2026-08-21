@@ -87,6 +87,20 @@ func sanitizedError(prefix string, err error, in Input) error {
 	}
 }
 
+func Retryable(err error) (bool, bool) {
+	for err != nil {
+		if protocolErr, ok := err.(*sidecarProtocolError); ok {
+			return protocolErr.retryable, protocolErr.retryableKnown
+		}
+		if registrationErr, ok := err.(*registrationError); ok {
+			err = registrationErr.cause
+			continue
+		}
+		err = errors.Unwrap(err)
+	}
+	return false, false
+}
+
 func normalizeBackend(backend string) (string, error) {
 	backend = strings.ToLower(strings.TrimSpace(backend))
 	if backend == "" {

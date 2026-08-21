@@ -20,6 +20,7 @@ from urllib.parse import quote, urlsplit
 try:
     from cloakbrowser_flow import (
         RegistrationFlow,
+        RequestProgress,
         SidecarError,
         Signals,
         birthdate_from_age,
@@ -32,6 +33,7 @@ except ModuleNotFoundError as exc:
         raise
     from internal.codexreg.cloakbrowser_flow import (
         RegistrationFlow,
+        RequestProgress,
         SidecarError,
         Signals,
         birthdate_from_age,
@@ -220,6 +222,7 @@ class Registration:
         self.code_waiter: Optional[asyncio.Future[str]] = None
         self.context: Any = None
         self.log_tasks: set[asyncio.Task[None]] = set()
+        self.network_progress: dict[str, list[float]] = {}
         self.secrets = [str(payload[key]) for key in ("email", "password", "proxy") if payload.get(key)]
 
     async def log(self, text: str) -> None:
@@ -268,8 +271,32 @@ class Registration:
             clip = scaled_clip(size, factor)
             png = await page.screenshot(type="png", clip=clip, mask=masks, animations="disabled")
 
+    def record_request(self, request: Any) -> None:
+        self._record_network(request.url, 0)
+
+    def record_response(self, response: Any) -> None:
+        self._record_network(response.url, 1 if response.status < 400 else 2)
+
+    def record_request_failure(self, request: Any) -> None:
+        self._record_network(request.url, 2)
+
+    def _record_network(self, url: str, index: int) -> None:
+        path = urlsplit(url).path or "/"
+        values = self.network_progress.setdefault(path, [0.0, 0.0, 0.0, 0.0])
+        values[index] += 1
+        values[3] = asyncio.get_running_loop().time()
+
+    def request_progress(self, paths: tuple[str, ...]) -> RequestProgress:
+        values = [self.network_progress.get(path, [0.0, 0.0, 0.0, 0.0]) for path in paths]
+        return RequestProgress(
+            started=int(sum(item[0] for item in values)),
+            succeeded=int(sum(item[1] for item in values)),
+            failed=int(sum(item[2] for item in values)),
+            last_activity=max((item[3] for item in values), default=0.0),
+        )
+
     async def registration_loop(self, context: Any) -> Any:
-        flow = RegistrationFlow(self.payload, self.request_code, self.log)
+        flow = RegistrationFlow(self.payload, self.request_code, self.log, self.request_progress)
         return await flow.run(context)
 
 
@@ -336,6 +363,7 @@ async def browse(registration: Registration) -> str:
     profile = Path(tempfile.mkdtemp(prefix=f"task-{registration.request_id[:12]}-", dir=root))
     try:
         context = await launch_context(registration, profile)
+        context.on("request", lambda request: observe_request(registration, request))
         context.on("response", lambda response: observe_response(registration, response))
         context.on("requestfailed", lambda request: observe_request_failure(registration, request))
         page = context.pages[-1] if context.pages else await context.new_page()
@@ -589,8 +617,16 @@ def network_failure_message(request: Any) -> Optional[str]:
     return f"network failure {request.resource_type} {request.method} host={host} path={safe_network_path(request.url)} reason={request.failure}"
 
 
+def observe_request(registration: Registration, request: Any) -> None:
+    try:
+        registration.record_request(request)
+    except Exception:
+        pass
+
+
 def observe_response(registration: Registration, response: Any) -> None:
     try:
+        registration.record_response(response)
         message = network_response_message(response)
         if message:
             registration.schedule_log(message)
@@ -600,6 +636,7 @@ def observe_response(registration: Registration, response: Any) -> None:
 
 def observe_request_failure(registration: Registration, request: Any) -> None:
     try:
+        registration.record_request_failure(request)
         message = network_failure_message(request)
         if message:
             registration.schedule_log(message)

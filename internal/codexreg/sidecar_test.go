@@ -170,7 +170,30 @@ func TestSidecarErrors(t *testing.T) {
 		if !strings.Contains(message, "sidecar stderr") || !strings.Contains(message, "[redacted]") {
 			t.Fatalf("sanitized stderr missing: %s", message)
 		}
+		if _, known := Retryable(err); known {
+			t.Fatal("legacy sidecar error unexpectedly has retryability")
+		}
 	})
+
+	for _, test := range []struct {
+		mode string
+		want bool
+	}{
+		{mode: "retryable_error", want: true},
+		{mode: "terminal_error", want: false},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			_, err := Register(context.Background(), sidecarTestInput(t, test.mode))
+			if err == nil {
+				t.Fatal("Register() returned nil error")
+			}
+			got, known := Retryable(err)
+			if !known || got != test.want {
+				t.Fatalf("Retryable()=(%v, %v) want (%v, true)", got, known, test.want)
+			}
+			assertNoSidecarSecrets(t, err.Error())
+		})
+	}
 
 	t.Run("account taken", func(t *testing.T) {
 		_, err := Register(context.Background(), sidecarTestInput(t, "account_taken"))
@@ -390,6 +413,12 @@ func runSidecarHelper(mode string) error {
 	case "error":
 		_, _ = fmt.Fprintln(os.Stderr, "stderr sensitive@example.test secret-password proxy-password 654321 "+sidecarTestToken())
 		return send(sidecarMessage{Type: "error", Code: "browser_error", Message: "failure for sensitive@example.test secret-password proxy-password 654321 " + sidecarTestToken()})
+	case "retryable_error":
+		retryable := true
+		return send(sidecarMessage{Type: "error", Code: "password_stalled", Message: "retry sensitive@example.test", Retryable: &retryable})
+	case "terminal_error":
+		retryable := false
+		return send(sidecarMessage{Type: "error", Code: "invalid_payload", Message: "terminal sensitive@example.test", Retryable: &retryable})
 	case "account_taken":
 		return send(sidecarMessage{Type: "error", Code: "account_taken", Message: "already used"})
 	case "empty_result":

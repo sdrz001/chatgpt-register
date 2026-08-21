@@ -712,6 +712,46 @@ class InputFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("button:not([type])", flow_module.SUBMIT)
         self.assertNotIn("button[type='button']", flow_module.SUBMIT)
 
+    async def test_request_progress_aggregates_business_path_activity(self):
+        registration = sidecar.Registration(
+            mock.AsyncMock(), "request-1", {"email": "person@example.test", "password": "secret"}
+        )
+        registration.record_request(mock.Mock(url="https://auth.openai.com/api/accounts/user/register"))
+        registration.record_response(mock.Mock(url="https://auth.openai.com/api/accounts/user/register", status=200))
+        registration.record_request(mock.Mock(url="https://auth.openai.com/api/accounts/user/register"))
+        registration.record_request_failure(mock.Mock(url="https://auth.openai.com/api/accounts/user/register"))
+        progress = registration.request_progress(("/api/accounts/user/register",))
+        self.assertEqual(progress.started, 2)
+        self.assertEqual(progress.succeeded, 1)
+        self.assertEqual(progress.failed, 1)
+        self.assertGreater(progress.last_activity, 0)
+
+    async def test_click_submit_scopes_candidates_to_field_form(self):
+        flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        field = mock.MagicMock()
+        form = mock.MagicMock()
+        form.count = mock.AsyncMock(return_value=1)
+        form.first = form
+        field.locator.return_value = form
+        submit = mock.AsyncMock()
+        submit.inner_text.return_value = "Continue"
+        submit.get_attribute.return_value = "submit"
+        submit.is_visible.return_value = True
+        submit.is_enabled.return_value = True
+        submit.bounding_box.return_value = {"x": 1, "y": 1, "width": 100, "height": 40}
+        candidates = mock.MagicMock()
+        candidates.count = mock.AsyncMock(return_value=1)
+        candidates.nth.return_value = submit
+        form.locator.return_value = candidates
+        page = mock.MagicMock()
+        with mock.patch.object(flow_module, "actionable", new=mock.AsyncMock(return_value=field)), mock.patch.object(
+            flow_module.asyncio, "sleep", new=mock.AsyncMock()
+        ):
+            await flow_module.click_submit(page, flow_module.EMAIL)
+        form.locator.assert_called_once_with(flow_module.ACTIONS)
+        page.locator.assert_not_called()
+        submit.click.assert_awaited_once()
+
     async def test_click_submit_skips_external_login_buttons(self):
         flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
         google = mock.AsyncMock()
@@ -796,7 +836,7 @@ class InputFlowTests(unittest.IsolatedAsyncioTestCase):
             await flow._handle_profile(page, sidecar.Signals(), 1.0)
         fill_name.assert_awaited_once_with(name_field, "Reese Brooks")
         fill_birthdate.assert_awaited_once_with(birthdate_field, "35")
-        submit.assert_awaited_once_with(page)
+        submit.assert_awaited_once_with(page, flow_module.NAME)
 
     async def test_segmented_profile_page_fills_segments_before_submit(self):
         flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
@@ -813,60 +853,72 @@ class InputFlowTests(unittest.IsolatedAsyncioTestCase):
         ) as fill_segments, mock.patch.object(flow_module, "click_submit", new=mock.AsyncMock()) as submit:
             await flow._handle_profile(page, signals, 1.0)
         fill_segments.assert_awaited_once_with(page, "35")
-        submit.assert_awaited_once_with(page)
+        submit.assert_awaited_once_with(page, flow_module.NAME)
 
     def test_profile_submission_gate_throttles_validation_retries(self):
         flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
         gate = flow_module.ProfileSubmissionGate()
-        gate.mark(1.0, "form-1", "Reese Brooks", "1991/02/03")
+        progress = flow_module.RequestProgress()
+        gate.mark(1.0, "form-1", "Reese Brooks", "1991/02/03", progress)
         stable = sidecar.Signals(profile_key="form-1", name_value="Reese Brooks", profile_value="1991/02/03")
         rollback = sidecar.Signals(profile_key="form-1", name_value="", profile_value="2026/08/12")
-        self.assertFalse(gate.should_submit(rollback, 1.5))
-        self.assertTrue(gate.should_submit(rollback, 2.0))
-        self.assertFalse(gate.should_submit(stable, 29.9))
+        self.assertFalse(gate.should_submit(rollback, progress, 1.5))
+        self.assertTrue(gate.should_submit(rollback, progress, 2.0))
+        in_flight = flow_module.RequestProgress(started=1, last_activity=2.0)
+        self.assertFalse(gate.should_submit(stable, in_flight, 29.9))
 
     async def test_profile_page_waits_for_navigation_without_resubmitting(self):
         flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        progress = flow_module.RequestProgress()
         flow = sidecar.RegistrationFlow(
-            {"full_name": "Reese Brooks", "age": "35"}, mock.AsyncMock(), mock.AsyncMock()
+            {"full_name": "Reese Brooks", "age": "35"}, mock.AsyncMock(), mock.AsyncMock(),
+            lambda _paths: progress,
         )
         page = mock.MagicMock()
         field = mock.AsyncMock()
         initial = sidecar.Signals(profile_key="form-1")
         stable = sidecar.Signals(profile_key="form-1", name_value="Reese Brooks", profile_value="1991-02-03")
-        rollback = sidecar.Signals(profile_key="form-1", name_value="", profile_value="2026-08-12")
+
+        async def submit_form(_page, _selector):
+            nonlocal progress
+            progress = flow_module.RequestProgress(started=1, last_activity=1.0)
+
         with mock.patch.object(
             flow_module, "actionable", new=mock.AsyncMock(return_value=field)
         ), mock.patch.object(flow_module, "stable_input_value", new=mock.AsyncMock()) as fill_name, mock.patch.object(
             flow_module, "fill_profile_field", new=mock.AsyncMock(return_value="1991-02-03")
-        ) as fill_profile, mock.patch.object(flow_module, "click_submit", new=mock.AsyncMock()) as submit, mock.patch.object(
-            flow_module, "monotonic_time", side_effect=[1.0, 3.0]
+        ) as fill_profile, mock.patch.object(flow_module, "click_submit", side_effect=submit_form) as submit, mock.patch.object(
+            flow_module, "monotonic_time", return_value=1.0
         ):
             await flow._handle_profile(page, initial, 1.0)
             await flow._handle_profile(page, stable, 2.0)
-            await flow._handle_profile(page, rollback, 3.0)
             await flow._handle_profile(page, stable, 29.9)
-        self.assertEqual(fill_name.await_count, 2)
-        self.assertEqual(fill_profile.await_count, 2)
-        self.assertEqual(submit.await_count, 2)
-        with self.assertRaises(sidecar.SidecarError) as caught:
-            await flow._handle_profile(page, stable, 33.0)
-        self.assertEqual(caught.exception.code, "profile_stalled")
+        self.assertEqual(fill_name.await_count, 1)
+        self.assertEqual(fill_profile.await_count, 1)
+        self.assertEqual(submit.await_count, 1)
 
 
 class PasswordFlowTests(unittest.IsolatedAsyncioTestCase):
-    async def test_password_page_waits_for_navigation_without_resubmitting(self):
+    async def test_password_page_waits_for_inflight_request_without_resubmitting(self):
         flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        progress = flow_module.RequestProgress()
         flow = sidecar.RegistrationFlow(
-            {"password": "long-enough-password"}, mock.AsyncMock(), mock.AsyncMock()
+            {"password": "long-enough-password"}, mock.AsyncMock(), mock.AsyncMock(),
+            lambda _paths: progress,
         )
         page = mock.MagicMock()
+        signals = sidecar.Signals(password=True, password_value="long-enough-password")
+
+        async def submit_form(_page, _selector):
+            nonlocal progress
+            progress = flow_module.RequestProgress(started=1, last_activity=1.0)
+
         with mock.patch.object(flow_module, "fill_value", new=mock.AsyncMock()) as fill, mock.patch.object(
-            flow_module, "click_submit", new=mock.AsyncMock()
+            flow_module, "click_submit", side_effect=submit_form
         ) as submit, mock.patch.object(flow_module, "monotonic_time", return_value=1.0):
-            await flow._handle_password(page, 1.0)
-            await flow._handle_password(page, 4.0)
-            await flow._handle_password(page, 29.9)
+            await flow._handle_password(page, signals, 1.0)
+            await flow._handle_password(page, signals, 6.0)
+            await flow._handle_password(page, signals, 29.9)
         self.assertEqual(fill.await_count, 1)
         self.assertEqual(submit.await_count, 1)
 
@@ -876,14 +928,17 @@ class PasswordFlowTests(unittest.IsolatedAsyncioTestCase):
             {"password": "long-enough-password"}, mock.AsyncMock(), mock.AsyncMock()
         )
         page = mock.MagicMock()
-        with mock.patch.object(flow_module, "fill_value", new=mock.AsyncMock()), mock.patch.object(
+        signals = sidecar.Signals(password=True, password_value="long-enough-password")
+        with mock.patch.object(flow_module, "fill_value", new=mock.AsyncMock()) as fill, mock.patch.object(
             flow_module, "click_submit", new=mock.AsyncMock()
-        ), mock.patch.object(flow_module, "monotonic_time", return_value=1.0):
-            await flow._handle_password(page, 1.0)
-            await flow._handle_password(page, 4.0)
-            await flow._handle_password(page, 29.9)
+        ) as submit, mock.patch.object(flow_module, "monotonic_time", side_effect=[1.0, 6.0, 11.0]):
+            await flow._handle_password(page, signals, 1.0)
+            await flow._handle_password(page, signals, 6.0)
+            await flow._handle_password(page, signals, 11.0)
             with self.assertRaises(sidecar.SidecarError) as caught:
-                await flow._handle_password(page, 31.0)
+                await flow._handle_password(page, signals, 41.0)
+        self.assertEqual(fill.await_count, 3)
+        self.assertEqual(submit.await_count, 3)
         self.assertEqual(caught.exception.code, "password_stalled")
 
 
@@ -954,7 +1009,7 @@ class PasswordChoiceFlowTests(unittest.IsolatedAsyncioTestCase):
         flow = sidecar.RegistrationFlow(
             {"registration_flow": "password"}, request_code, mock.AsyncMock()
         )
-        flow.password.mark(0.5)
+        flow.password.mark(0.5, "secret", sidecar.RequestProgress())
         page = mock.MagicMock()
         with mock.patch.object(
             sys.modules[sidecar.RegistrationFlow.__module__], "fill_value", new=mock.AsyncMock()
@@ -1052,7 +1107,7 @@ class EmailFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         clock = 1.0
 
-        async def slow_click(_page):
+        async def slow_click(_page, _selector):
             nonlocal clock
             clock = 4.0
 
@@ -1080,11 +1135,11 @@ class EmailFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         with mock.patch.object(flow_module, "fill_value", new=mock.AsyncMock()) as fill, mock.patch.object(
             flow_module, "click_submit", new=mock.AsyncMock()
-        ) as submit:
+        ) as submit, mock.patch.object(flow_module, "monotonic_time", side_effect=[1.0, 6.0]):
             await flow._handle_email(page, first, 1.0)
             await flow._handle_email(page, second, 2.0)
-            await flow._handle_email(page, second, 6.9)
-            await flow._handle_email(page, second, 7.0)
+            await flow._handle_email(page, second, 5.9)
+            await flow._handle_email(page, second, 6.0)
         self.assertEqual(fill.await_count, 2)
         self.assertEqual(submit.await_count, 2)
 
@@ -1102,13 +1157,36 @@ class EmailFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         with mock.patch.object(flow_module, "fill_value", new=mock.AsyncMock()) as fill, mock.patch.object(
             flow_module, "click_submit", new=mock.AsyncMock()
-        ) as submit:
+        ) as submit, mock.patch.object(flow_module, "monotonic_time", side_effect=[1.0, 6.0]):
             await flow._handle_email(page, first, 1.0)
             await flow._handle_email(page, second, 2.0)
-            await flow._handle_email(page, second, 6.9)
-            await flow._handle_email(page, second, 7.0)
+            await flow._handle_email(page, second, 5.9)
+            await flow._handle_email(page, second, 6.0)
         self.assertEqual(fill.await_count, 2)
         self.assertEqual(submit.await_count, 2)
+
+    async def test_email_request_progress_prevents_resubmission(self):
+        progress = sidecar.RequestProgress()
+        flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        flow = sidecar.RegistrationFlow(
+            {"email": "person@example.test"}, mock.AsyncMock(), mock.AsyncMock(),
+            lambda _paths: progress,
+        )
+        page = mock.MagicMock()
+        signals = sidecar.Signals(email=True, email_value="person@example.test")
+
+        async def submit_form(_page, _selector):
+            nonlocal progress
+            progress = sidecar.RequestProgress(started=1, last_activity=1.0)
+
+        with mock.patch.object(flow_module, "fill_value", new=mock.AsyncMock()) as fill, mock.patch.object(
+            flow_module, "click_submit", side_effect=submit_form
+        ) as submit, mock.patch.object(flow_module, "monotonic_time", return_value=1.0):
+            await flow._handle_email(page, signals, 1.0)
+            await flow._handle_email(page, signals, 6.0)
+            await flow._handle_email(page, sidecar.Signals(email=True), 20.0)
+        self.assertEqual(fill.await_count, 1)
+        self.assertEqual(submit.await_count, 1)
 
     async def test_cleared_email_field_resubmits_after_stability_delay(self):
         flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
@@ -1192,9 +1270,37 @@ class VerificationFlowTests(unittest.IsolatedAsyncioTestCase):
             await codes.step(page, signals, "code", 4.0)
             clock = 7.0
             await codes.step(page, signals, "code", 7.0)
+            clock = 12.0
+            await codes.step(page, signals, "code", 12.0)
         self.assertEqual(requested, [1])
         self.assertEqual(fill.await_count, 3)
         self.assertEqual(submit.await_count, 3)
+
+    async def test_successful_code_request_extends_navigation_wait(self):
+        progress = sidecar.RequestProgress()
+
+        async def request_code(_attempt):
+            return "123456"
+
+        flow_module = sys.modules[sidecar.RegistrationFlow.__module__]
+        codes = sidecar.RegistrationFlow(
+            {}, request_code, mock.AsyncMock(), lambda _paths: progress,
+        ).codes
+        page = mock.MagicMock()
+        signals = sidecar.Signals(code=True, code_value="123456")
+
+        async def submit_form(_page, _selector):
+            nonlocal progress
+            progress = sidecar.RequestProgress(started=1, succeeded=1, last_activity=40.0)
+
+        with mock.patch.object(flow_module, "fill_value", new=mock.AsyncMock()) as fill, mock.patch.object(
+            flow_module, "click_submit", side_effect=submit_form
+        ) as submit, mock.patch.object(flow_module, "monotonic_time", return_value=1.0):
+            await codes.step(page, signals, "code", 1.0)
+            await codes.step(page, signals, "code", 41.0)
+            await codes.step(page, signals, "code", 100.0)
+        self.assertEqual(fill.await_count, 1)
+        self.assertEqual(submit.await_count, 1)
 
     async def test_rejected_page_requests_once_until_page_changes(self):
         requested = []

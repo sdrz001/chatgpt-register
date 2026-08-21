@@ -55,7 +55,13 @@ FAST_POLL_INTERVAL = 0.25
 WAIT_POLL_INTERVAL = 0.5
 CHALLENGE_POLL_INTERVAL = 1.0
 CHALLENGE_TIMEOUT = 120.0
-EMAIL_RETRY_INTERVAL = 15.0
+EMAIL_RETRY_INTERVAL = 10.0
+FORM_PROGRESS_TIMEOUT = 90.0
+EMAIL_REQUEST_PATHS = ("/api/auth/signin/openai", "/api/accounts/authorize")
+PASSWORD_REQUEST_PATHS = ("/api/accounts/user/register",)
+CODE_REQUEST_PATHS = ("/api/accounts/email-otp/validate",)
+PROFILE_REQUEST_PATHS = ("/api/accounts/create_account",)
+BUSINESS_REQUEST_PATHS = EMAIL_REQUEST_PATHS + PASSWORD_REQUEST_PATHS + CODE_REQUEST_PATHS + PROFILE_REQUEST_PATHS
 INSPECT_SCRIPT = r"""() => {
     const visible = element => {
         if (!element) return false;
@@ -109,8 +115,12 @@ INSPECT_SCRIPT = r"""() => {
         documentKey: String(performance.timeOrigin),
         email: !!email,
         emailValue: email ? (email.value || '') : '',
+        emailInvalid: !!email && (email.getAttribute('aria-invalid') === 'true' || /invalid|incorrect|required|inv[áa]lido|incorreto|obrigat[óo]rio|错误|无效|必填/i.test(alerts)),
         password: !!password,
+        passwordValue: password ? (password.value || '') : '',
+        passwordInvalid: !!password && (password.getAttribute('aria-invalid') === 'true' || /password.{0,40}(invalid|incorrect|required|short|weak)|invalid.{0,40}password|senha.{0,40}(inv[áa]lid|incorret|obrigat)|密码.{0,20}(错误|无效|必填|太短|强度)/i.test(alerts)),
         code: !!code,
+        codeValue: code ? (code.value || '') : '',
         passwordSignup: !!passwordSignup,
         codeInvalid: !!code && (code.getAttribute('aria-invalid') === 'true' || /invalid|incorrect|wrong|expired|inv[áa]lido|incorreto|expirou|expirado|错误|无效|过期|正しくありません|無効|有効期限/i.test(alerts)),
         name: !!name,
@@ -154,8 +164,12 @@ class Signals:
     document_key: str = ""
     email: bool = False
     email_value: str = ""
+    email_invalid: bool = False
     password: bool = False
+    password_value: str = ""
+    password_invalid: bool = False
     code: bool = False
+    code_value: str = ""
     password_signup: bool = False
     code_invalid: bool = False
     name: bool = False
@@ -280,8 +294,10 @@ async def inspect_page(page: Any) -> Signals:
     return Signals(
         url=str(values.get("url", "")), body=str(values.get("body", "")),
         document_key=str(values.get("documentKey", "")), email=bool(values.get("email")),
-        email_value=str(values.get("emailValue", "")), password=bool(values.get("password")),
-        code=bool(values.get("code")), password_signup=bool(values.get("passwordSignup")),
+        email_value=str(values.get("emailValue", "")), email_invalid=bool(values.get("emailInvalid")),
+        password=bool(values.get("password")), password_value=str(values.get("passwordValue", "")),
+        password_invalid=bool(values.get("passwordInvalid")), code=bool(values.get("code")),
+        code_value=str(values.get("codeValue", "")), password_signup=bool(values.get("passwordSignup")),
         code_invalid=bool(values.get("codeInvalid")),
         name=bool(values.get("name")), name_value=str(values.get("nameValue", "")),
         profile_field=str(values.get("profileField", "")), profile_value=str(values.get("profileValue", "")),
@@ -360,11 +376,7 @@ async def set_input_value(item: Any, value: str) -> None:
 
 async def fill_value(page: Any, selector: str, value: str) -> None:
     item = await actionable(page, selector, editable=True)
-    await set_input_value(item, value)
-    if await item.input_value() != value:
-        await item.fill(value)
-    if await item.input_value() != value:
-        raise SidecarError("input_stalled", "page input did not retain the requested value", True)
+    await stable_input_value(item, value)
 
 
 async def action_diagnostic(page: Any) -> str:
@@ -372,11 +384,17 @@ async def action_diagnostic(page: Any) -> str:
     return json.dumps(values, ensure_ascii=False, separators=(",", ":"))[:2000]
 
 
-async def click_submit(page: Any) -> None:
+async def click_submit(page: Any, field_selector: str = "") -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + 20
+    scope = page
+    if field_selector:
+        field = await actionable(page, field_selector, editable=True)
+        forms = field.locator("xpath=ancestor::form[1]")
+        if await forms.count():
+            scope = forms.first
     while loop.time() < deadline:
-        candidates = page.locator(ACTIONS)
+        candidates = scope.locator(ACTIONS)
         for index in range(await candidates.count()):
             item = candidates.nth(index)
             text = (await item.inner_text()).strip()
@@ -407,6 +425,14 @@ async def click_action(page: Any, pattern: re.Pattern[str], required: bool) -> b
     return False
 
 
+@dataclass(frozen=True)
+class RequestProgress:
+    started: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    last_activity: float = 0.0
+
+
 @dataclass
 class SubmissionGate:
     submitted_at: Optional[float] = None
@@ -423,70 +449,95 @@ class SubmissionGate:
 
 
 @dataclass
+class FormSubmissionGate:
+    attempts: int = 0
+    submitted_at: Optional[float] = None
+    expected_value: str = ""
+    baseline: RequestProgress = RequestProgress()
+
+    def pending(self) -> bool:
+        return self.attempts == 0
+
+    def should_submit(self, value: str, invalid: bool, progress: RequestProgress, now: float) -> bool:
+        if self.attempts == 0:
+            return True
+        if self.attempts >= 3 or self.submitted_at is None or now - self.submitted_at < 1:
+            return False
+        started = progress.started - self.baseline.started
+        succeeded = progress.succeeded - self.baseline.succeeded
+        failed = progress.failed - self.baseline.failed
+        if started > 0:
+            if succeeded > 0 or started > succeeded + failed:
+                return False
+            return failed > 0
+        return invalid or value != self.expected_value or now - self.submitted_at >= 5
+
+    def mark(self, now: float, expected_value: str, baseline: RequestProgress) -> None:
+        self.attempts += 1
+        self.submitted_at = now
+        self.expected_value = expected_value
+        self.baseline = baseline
+
+    def ensure_progress(self, now: float, progress: RequestProgress, code: str, message: str) -> None:
+        if self.submitted_at is None:
+            return
+        started = progress.started - self.baseline.started
+        last_activity = max(self.submitted_at, progress.last_activity if started > 0 else 0.0)
+        if started > 0 and now - last_activity >= FORM_PROGRESS_TIMEOUT:
+            raise SidecarError(code, message, True)
+        if self.attempts >= 3 and started <= 0 and now - self.submitted_at >= 30:
+            raise SidecarError(code, message, True)
+
+
+@dataclass
 class ProfileSubmissionGate:
     attempts: int = 0
     submitted_at: Optional[float] = None
     submitted_key: str = ""
     expected_name: str = ""
     expected_profile: str = ""
+    baseline: RequestProgress = RequestProgress()
 
-    def should_submit(self, signals: Signals, now: float) -> bool:
+    def should_submit(self, signals: Signals, progress: RequestProgress, now: float) -> bool:
         if self.attempts == 0:
             return True
         if self.attempts >= 3 or self.submitted_at is None or now - self.submitted_at < 1:
             return False
+        started = progress.started - self.baseline.started
+        succeeded = progress.succeeded - self.baseline.succeeded
+        failed = progress.failed - self.baseline.failed
+        if started > 0:
+            if succeeded > 0 or started > succeeded + failed:
+                return False
+            return failed > 0
         changed_form = bool(self.submitted_key and signals.profile_key and signals.profile_key != self.submitted_key)
         rolled_back = signals.name_value != self.expected_name or signals.profile_value != self.expected_profile
-        return signals.profile_invalid or changed_form or rolled_back
+        return signals.profile_invalid or changed_form or rolled_back or now - self.submitted_at >= 5
 
-    def mark(self, now: float, profile_key: str, expected_name: str, expected_profile: str) -> None:
+    def mark(
+        self,
+        now: float,
+        profile_key: str,
+        expected_name: str,
+        expected_profile: str,
+        baseline: RequestProgress,
+    ) -> None:
         self.attempts += 1
         self.submitted_at = now
         self.submitted_key = profile_key
         self.expected_name = expected_name
         self.expected_profile = expected_profile
+        self.baseline = baseline
 
-    def ensure_progress(self, now: float) -> None:
-        if self.submitted_at is not None and now - self.submitted_at >= 30:
-            raise SidecarError("profile_stalled", f"profile page did not advance after {self.attempts} submission(s)", True)
-
-
-@dataclass
-class EmailSubmissionGate:
-    attempts: int = 0
-    submitted_at: Optional[float] = None
-    submitted_key: str = ""
-    empty_since: Optional[float] = None
-
-    def should_submit(self, signals: Signals, now: float) -> bool:
-        if self.attempts == 0:
-            return True
-        if self.attempts >= 3:
-            return False
-        stable_key = email_page_key(signals)
-        if stable_key == self.submitted_key:
-            self.empty_since = None
-            return self.submitted_at is not None and now - self.submitted_at >= EMAIL_RETRY_INTERVAL
-        if self.empty_since is None:
-            self.empty_since = now
-            return False
-        return now - self.empty_since >= 5
-
-    def mark(self, signals: Signals, now: float) -> None:
-        self.attempts += 1
-        self.submitted_at = now
-        self.submitted_key = email_page_key(signals)
-        self.empty_since = None
-
-    def ensure_attempt_available(self) -> None:
-        if self.attempts >= 3:
-            raise SidecarError("email_stalled", "email was requested more than three times", True)
-
-    def ensure_progress(self, now: float) -> None:
-        if self.empty_since is not None:
+    def ensure_progress(self, now: float, progress: RequestProgress) -> None:
+        if self.submitted_at is None:
             return
-        if self.attempts >= 3 and self.submitted_at is not None and now - self.submitted_at >= 30:
-            raise SidecarError("email_stalled", "email page did not advance after three submissions", True)
+        started = progress.started - self.baseline.started
+        last_activity = max(self.submitted_at, progress.last_activity if started > 0 else 0.0)
+        if started > 0 and now - last_activity >= FORM_PROGRESS_TIMEOUT:
+            raise SidecarError("profile_stalled", f"profile page did not advance after {self.attempts} submission(s)", True)
+        if self.attempts >= 3 and started <= 0 and now - self.submitted_at >= 30:
+            raise SidecarError("profile_stalled", f"profile page did not advance after {self.attempts} submission(s)", True)
 
 
 def monotonic_time() -> float:
@@ -494,14 +545,20 @@ def monotonic_time() -> float:
 
 
 class VerificationCodes:
-    def __init__(self, request_code: Callable[[int], Awaitable[str]]) -> None:
+    def __init__(
+        self,
+        request_code: Callable[[int], Awaitable[str]],
+        request_progress: Callable[[tuple[str, ...]], RequestProgress],
+    ) -> None:
         self.request_code = request_code
+        self.request_progress = request_progress
         self.attempts = 0
         self.phase = "idle"
         self.submitted_at = 0.0
         self.submitted_key = ""
         self.current_code = ""
         self.current_submissions = 0
+        self.baseline = RequestProgress()
         self.rejection_key = ""
         self.refresh_at = 0.0
         self.waited_seconds = 0.0
@@ -517,22 +574,32 @@ class VerificationCodes:
             await self._submit(page, key, now)
             return
         if self.phase == "submitted":
-            await self._submitted_step(page, state, key, now)
+            await self._submitted_step(page, signals, state, key, now)
             return
         if self.phase == "await_refresh":
             await self._refresh_step(page, state, key, now)
 
-    async def _submitted_step(self, page: Any, state: str, key: str, now: float) -> None:
+    async def _submitted_step(self, page: Any, signals: Signals, state: str, key: str, now: float) -> None:
         if state == "code_rejected" and key != self.submitted_key:
             await self._reject(page, key, now)
             return
-        if state == "code" and now - self.submitted_at >= 3 and self.current_submissions < 3:
+        progress = self.request_progress(CODE_REQUEST_PATHS)
+        started = progress.started - self.baseline.started
+        succeeded = progress.succeeded - self.baseline.succeeded
+        failed = progress.failed - self.baseline.failed
+        pending = started > succeeded + failed
+        retryable = failed > 0 or started <= 0 or signals.code_value != self.current_code
+        if state == "code" and retryable and not pending and succeeded <= 0 and now - self.submitted_at >= 5 and self.current_submissions < 3:
+            self.baseline = self.request_progress(CODE_REQUEST_PATHS)
             await fill_value(page, CODE, self.current_code)
-            await click_submit(page)
+            await click_submit(page, CODE)
             self.current_submissions += 1
             self.submitted_at = monotonic_time()
             return
-        if now - self.submitted_at >= 40:
+        last_activity = max(self.submitted_at, progress.last_activity if started > 0 else 0.0)
+        if started > 0 and now - last_activity >= FORM_PROGRESS_TIMEOUT:
+            raise SidecarError("code_stalled", "verification page did not advance", True)
+        if self.current_submissions >= 3 and started <= 0 and now - self.submitted_at >= 30:
             raise SidecarError("code_stalled", "verification page did not advance", True)
 
     async def _refresh_step(self, page: Any, state: str, key: str, now: float) -> None:
@@ -562,8 +629,9 @@ class VerificationCodes:
             self.waited_seconds += monotonic_time() - started_at
         self.current_code = code
         self.current_submissions = 1
+        self.baseline = self.request_progress(CODE_REQUEST_PATHS)
         await fill_value(page, CODE, code)
-        await click_submit(page)
+        await click_submit(page, CODE)
         self.phase = "submitted"
         self.submitted_at = monotonic_time()
         self.submitted_key = key
@@ -584,13 +652,15 @@ class RegistrationFlow:
         payload: Mapping[str, Any],
         request_code: Callable[[int], Awaitable[str]],
         log: Callable[[str], Awaitable[None]],
+        request_progress: Optional[Callable[[tuple[str, ...]], RequestProgress]] = None,
     ) -> None:
         self.payload = payload
         self.log = log
-        self.codes = VerificationCodes(request_code)
-        self.email = EmailSubmissionGate()
+        self.request_progress = request_progress or (lambda _paths: RequestProgress())
+        self.codes = VerificationCodes(request_code, self.request_progress)
+        self.email = FormSubmissionGate()
         self.password_choice = SubmissionGate()
-        self.password = SubmissionGate()
+        self.password = FormSubmissionGate()
         self.profile = ProfileSubmissionGate()
         self.retry = SubmissionGate()
         self.challenge_since: Optional[float] = None
@@ -599,13 +669,24 @@ class RegistrationFlow:
     async def run(self, context: Any) -> Any:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 240
-        while loop.time() < deadline:
+        while True:
+            now = loop.time()
+            if now >= deadline:
+                progress = self.request_progress(BUSINESS_REQUEST_PATHS)
+                if progress.last_activity <= 0 or now - progress.last_activity >= FORM_PROGRESS_TIMEOUT:
+                    break
+                deadline = progress.last_activity + FORM_PROGRESS_TIMEOUT
             page, signals, state = await inspect_context(context)
             page_urls = " | ".join(
                 f"{urlsplit(item.url).netloc}{urlsplit(item.url).path}"
                 for item in context.pages if not item.is_closed()
             )
-            state_key = f"{state}\n{signals.url}\n{signals.document_key}\n{page_urls}"
+            field_state = ",".join((
+                f"email={'set' if signals.email_value else 'empty'}{'-invalid' if signals.email_invalid else ''}",
+                f"password={'set' if signals.password_value else 'empty'}{'-invalid' if signals.password_invalid else ''}",
+                f"code={'set' if signals.code_value else 'empty'}{'-invalid' if signals.code_invalid else ''}",
+            ))
+            state_key = f"{state}\n{signals.url}\n{signals.document_key}\n{page_urls}\n{field_state}"
             if state_key != self.last_state_key:
                 parsed = urlsplit(signals.url)
                 fields = ",".join(name for name, present in (
@@ -615,7 +696,7 @@ class RegistrationFlow:
                 ) if present) or "none"
                 actions = re.sub(r"\s+", " ", signals.actions).strip()[:240] or "none"
                 body = re.sub(r"\s+", " ", signals.body).strip()[:320] or "none"
-                await self.log(f"page state={state} url={parsed.netloc}{parsed.path} pages={page_urls} fields={fields} actions={actions} body={body}")
+                await self.log(f"page state={state} url={parsed.netloc}{parsed.path} pages={page_urls} fields={fields} values={field_state} actions={actions} body={body}")
                 self.last_state_key = state_key
             try:
                 done = await self._step(page, signals, state, loop.time())
@@ -660,7 +741,7 @@ class RegistrationFlow:
             await self.codes.step(page, signals, "code", now)
             return False
         if state == "password":
-            await self._handle_password(page, now)
+            await self._handle_password(page, signals, now)
             return False
         if state in ("code", "code_rejected"):
             await self.codes.step(page, signals, state, now)
@@ -681,18 +762,21 @@ class RegistrationFlow:
         self.retry.ensure_progress(now, "temporary_error", "temporary page error remained after one retry")
 
     async def _handle_email(self, page: Any, signals: Signals, now: float) -> None:
-        if self.email.should_submit(signals, now):
-            self.email.ensure_attempt_available()
+        progress = self.request_progress(EMAIL_REQUEST_PATHS)
+        expected = str(self.payload["email"])
+        if self.email.should_submit(signals.email_value, signals.email_invalid, progress, now):
             if self.email.attempts:
                 await self.log("email requested again; resubmitting")
-            await self.log(f"email submission {self.email.attempts + 1}/3: filling field")
-            await fill_value(page, EMAIL, str(self.payload["email"]))
-            await self.log(f"email submission {self.email.attempts + 1}/3: clicking continue")
-            await click_submit(page)
-            self.email.mark(signals, monotonic_time())
+            attempt = self.email.attempts + 1
+            await self.log(f"email submission {attempt}/3: filling field")
+            await fill_value(page, EMAIL, expected)
+            baseline = self.request_progress(EMAIL_REQUEST_PATHS)
+            await self.log(f"email submission {attempt}/3: clicking continue")
+            await click_submit(page, EMAIL)
+            self.email.mark(monotonic_time(), expected, baseline)
             await self.log(f"email submission {self.email.attempts}/3: click completed")
             return
-        self.email.ensure_progress(now)
+        self.email.ensure_progress(now, progress, "email_stalled", "email page did not advance after three submissions")
 
     async def _handle_password_choice(self, page: Any, now: float) -> None:
         if self.password_choice.pending():
@@ -721,19 +805,24 @@ class RegistrationFlow:
             return
         self.password_choice.ensure_progress(now, "password_choice_stalled", "password registration link did not advance")
 
-    async def _handle_password(self, page: Any, now: float) -> None:
-        if self.password.pending():
-            await self.log("password submission: filling field")
-            await fill_value(page, PASSWORD, str(self.payload["password"]))
-            await self.log("password submission: clicking continue")
-            await click_submit(page)
-            self.password.mark(monotonic_time())
-            await self.log("password submission: click completed; waiting for navigation")
+    async def _handle_password(self, page: Any, signals: Signals, now: float) -> None:
+        progress = self.request_progress(PASSWORD_REQUEST_PATHS)
+        expected = str(self.payload["password"])
+        if self.password.should_submit(signals.password_value, signals.password_invalid, progress, now):
+            attempt = self.password.attempts + 1
+            await self.log(f"password submission {attempt}/3: filling field")
+            await fill_value(page, PASSWORD, expected)
+            baseline = self.request_progress(PASSWORD_REQUEST_PATHS)
+            await self.log(f"password submission {attempt}/3: clicking continue")
+            await click_submit(page, PASSWORD)
+            self.password.mark(monotonic_time(), expected, baseline)
+            await self.log(f"password submission {self.password.attempts}/3: click completed; waiting for navigation")
             return
-        self.password.ensure_progress(now, "password_stalled", "password page did not advance after submission")
+        self.password.ensure_progress(now, progress, "password_stalled", "password page did not advance after three submissions")
 
     async def _handle_profile(self, page: Any, signals: Signals, now: float) -> None:
-        if self.profile.should_submit(signals, now):
+        progress = self.request_progress(PROFILE_REQUEST_PATHS)
+        if self.profile.should_submit(signals, progress, now):
             await self.log(f"profile submission {self.profile.attempts + 1}/3: filling fields")
             name_field = await actionable(page, NAME, editable=True)
             await stable_input_value(name_field, str(self.payload["full_name"]))
@@ -743,11 +832,12 @@ class RegistrationFlow:
                 field = await actionable(page, PROFILE, editable=True)
                 birthdate = await fill_profile_field(field, str(self.payload["age"]))
             await self.log(f"profile submission {self.profile.attempts + 1}/3: fields stable (birthdate format={birthdate_format(birthdate)})")
-            await click_submit(page)
-            self.profile.mark(monotonic_time(), signals.profile_key, str(self.payload["full_name"]), birthdate)
+            baseline = self.request_progress(PROFILE_REQUEST_PATHS)
+            await click_submit(page, NAME)
+            self.profile.mark(monotonic_time(), signals.profile_key, str(self.payload["full_name"]), birthdate, baseline)
             await self.log(f"profile submission {self.profile.attempts}/3: click completed; waiting for navigation")
             return
-        self.profile.ensure_progress(now)
+        self.profile.ensure_progress(now, progress)
 
 
 def birthdate_format(value: str) -> str:
@@ -792,7 +882,7 @@ async def stable_input_value(field: Any, value: str) -> None:
     await field.blur()
     await asyncio.sleep(0.35)
     if await field.input_value() != value:
-        raise SidecarError("input_stalled", "profile input did not retain the requested value", True)
+        raise SidecarError("input_stalled", "page input did not retain the requested value", True)
 
 
 async def date_segment_kind(segment: Any) -> str:

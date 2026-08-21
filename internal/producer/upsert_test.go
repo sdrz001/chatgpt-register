@@ -261,6 +261,32 @@ func TestNextJobLimitsFailuresAndLetsOtherMailboxesRun(t *testing.T) {
 	}
 }
 
+func TestExhaustRegistrationRetrySkipsAddressAndLetsOtherMailboxRun(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Mailbox{}, &models.Registration{}); err != nil {
+		t.Fatal(err)
+	}
+	mailboxes := []models.Mailbox{
+		{Email: "terminal@example.test", Status: "verified"},
+		{Email: "available@example.test", Status: "verified"},
+	}
+	if err := database.Create(&mailboxes).Error; err != nil {
+		t.Fatal(err)
+	}
+	producer := &Producer{db: database, inflight: map[string]uint{}, attempts: map[string]registrationAttempt{}}
+	producer.exhaustRegistrationRetry(mailboxes[0].Email)
+	claimed, email, _, ok := producer.nextJob(Config{FissionCount: 0}, Scope{})
+	if !ok || claimed.ID != mailboxes[1].ID || email != mailboxes[1].Email {
+		t.Fatalf("claimed=%d email=%q ok=%v", claimed.ID, email, ok)
+	}
+	if producer.registrationAttemptReady(mailboxes[0].Email) {
+		t.Fatal("terminal address remained retryable")
+	}
+}
+
 func TestFailedFissionRetriesThenConsumesOneSlot(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
