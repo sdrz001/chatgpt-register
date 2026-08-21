@@ -74,11 +74,7 @@
       <div class="register-controls">
         <select id="register-scope" class="px-input" onchange="updateRegisterScope()">
           <option value="all">全部邮箱</option>
-          <option value="category">邮箱分组</option>
           <option value="mailboxes">指定邮箱</option>
-        </select>
-        <select id="register-category" class="px-input" style="display:none">
-          <option value="">选择邮箱分组</option>
         </select>
         <div id="register-mailbox-picker" class="mailbox-picker" style="display:none">
           <button id="register-mailbox-btn" class="px-btn mailbox-picker-btn" type="button" onclick="toggleMailboxPicker(event)">选择邮箱</button>
@@ -170,6 +166,6 @@
 
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js?v=2"></script>
-<script src="/static/accounts.js?v=24"></script>
+<script src="/static/accounts.js?v=25"></script>
 </body>
 </html>

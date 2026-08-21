@@ -244,7 +244,7 @@ async function loadRegisterSources() {
   const proxyPoolData = await proxyPoolResponse.json().catch(() => ({}));
   if (categoryResponse.ok) {
     mailboxCategories = categoryData.data || [];
-    rebuildRegisterCategorySelect();
+    rebuildRegisterScopeSelect();
   }
   if (proxyPoolResponse.ok) {
     proxyPools = proxyPoolData.data || [];
@@ -417,21 +417,20 @@ function rebuildRegisterProxyPoolSelect() {
   if (select._rebuild) select._rebuild();
 }
 
-function rebuildRegisterCategorySelect() {
-  const select = document.getElementById('register-category');
+function rebuildRegisterScopeSelect() {
+  const select = document.getElementById('register-scope');
   const current = select.value;
-  select.innerHTML = '<option value="">选择邮箱分组</option>' + mailboxCategories.map(category =>
-    `<option value="${category.id}">${esc(category.name)} (${category.item_count || 0})</option>`
-  ).join('');
-  if ([...select.options].some(option => option.value === current)) select.value = current;
+  select.innerHTML = '<option value="all">全部邮箱</option>' + mailboxCategories.map(category =>
+    `<option value="category:${category.id}">${esc(category.name)} (${category.item_count || 0})</option>`
+  ).join('') + '<option value="mailboxes">指定邮箱</option>';
+  select.value = [...select.options].some(option => option.value === current) ? current : 'all';
   if (select._rebuild) select._rebuild();
+  updateRegisterScope();
 }
 
 function updateRegisterScope() {
   const scope = document.getElementById('register-scope').value;
-  const category = document.getElementById('register-category');
   const picker = document.getElementById('register-mailbox-picker');
-  category.parentElement.style.display = scope === 'category' ? '' : 'none';
   picker.style.display = scope === 'mailboxes' ? '' : 'none';
   if (scope !== 'mailboxes') closeMailboxPicker();
 }
@@ -519,14 +518,13 @@ async function startProduce() {
   if (!browserReady) return toast('缺少浏览器，正在下载或下载失败，暂不能注册', true);
   const count = parseInt(document.getElementById('register-count').value, 10);
   if (!count || count < 1) return toast('请输入有效注册数量', true);
-  const scope = document.getElementById('register-scope').value;
+  const selection = document.getElementById('register-scope').value;
+  const categoryID = selection.startsWith('category:') ? Number(selection.slice('category:'.length)) : 0;
+  const scope = categoryID ? 'category' : selection;
   const proxyPoolSelect = document.getElementById('register-proxy-pool');
   const proxyPoolID = Number(proxyPoolSelect.value) || 0;
   const body = { count, scope, proxy_pool_id: proxyPoolID };
-  if (scope === 'category') {
-    body.category_id = Number(document.getElementById('register-category').value);
-    if (!body.category_id) return toast('请选择邮箱分组', true);
-  }
+  if (categoryID) body.category_id = categoryID;
   if (scope === 'mailboxes') {
     body.mailbox_ids = [...registerMailboxSelected];
     if (!body.mailbox_ids.length) return toast('请选择至少一个邮箱', true);
