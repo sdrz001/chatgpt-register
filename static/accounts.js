@@ -178,7 +178,7 @@ function rowHtml(x) {
   return `
     <tr class="${accSelected.has(x.id) ? 'row-sel' : ''}">
       <td class="col-check"><input type="checkbox" ${accSelected.has(x.id) ? 'checked' : ''} onclick="toggleSelect(${x.id}, this.checked)"></td>
-      <td><div class="account-email">${esc(x.email)}</div><div class="table-sub">${fmtTime(x.created_at)}</div></td>
+      <td class="account-email-cell"><div class="account-email" title="${esc(x.email)}">${esc(x.email)}</div><div class="table-sub">${fmtTime(x.created_at)}</div></td>
       <td>${x.category ? `<span class="category-chip">${esc(x.category.name)}</span>` : '<span class="table-muted">未分类</span>'}</td>
       <td>${registerCountryCell(x)}</td>
       <td><span class="badge at-${esc(atStatus)}" title="${esc(atTitle)}">${AT_STATUS[atStatus] || esc(atStatus)}</span></td>
@@ -191,7 +191,7 @@ function rowHtml(x) {
       <td class="ship-cell">
         <span class="badge ${x.shipped ? 'registered' : 'pending'}" title="下载后自动标记，不能手动修改">${x.shipped ? '已出库' : '未出库'}</span>
       </td>
-      <td>
+      <td class="account-actions-cell"><div class="account-actions">
         <button class="icon-btn" title="日志" onclick="showLog(${x.id})">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></svg>
         </button>
@@ -219,7 +219,7 @@ function rowHtml(x) {
         <button class="icon-btn danger" title="删除" onclick="del(${x.id})">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg>
         </button>
-      </td>
+      </div></td>
     </tr>`;
 }
 

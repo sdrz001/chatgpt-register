@@ -40,7 +40,7 @@ async function loadMailboxes() {
         <td>${Number(x.register_count || 0)} / ${Number(x.register_limit || 0)}</td>
         <td>${fmtTime(x.created_at)}</td>
         <td><span class="badge ${esc(x.status)}">${MB_STATUS[x.status] || esc(x.status)}</span></td>
-        <td>
+        <td class="mailbox-actions-cell"><div class="mailbox-actions">
           <button class="icon-btn" title="编辑邮箱与分类" onclick="editMailbox(${x.id})">
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/></svg>
           </button>
@@ -48,9 +48,9 @@ async function loadMailboxes() {
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
           </button>` : ''}
           <button class="icon-btn danger" title="删除" onclick="delMailbox(${x.id})">
-            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg>
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a2 2 0 0 1 1 1v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg>
           </button>
-        </td>
+        </div></td>
       </tr>`).join('');
     const maxPage = Math.max(1, Math.ceil((d.total || 0) / size));
     renderPager('mb-pager', mbPage, maxPage, p => { mbPage = p; loadMailboxes(); });
