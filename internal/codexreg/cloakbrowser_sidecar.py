@@ -52,6 +52,8 @@ REGISTRATION_TRIAL_WAIT_TIMEOUT = 30.0
 REGISTRATION_TRIAL_POLL_INTERVAL = 2.0
 REGISTRATION_TRIAL_INELIGIBLE_MIN_WAIT = 12.0
 REGISTRATION_TRIAL_INELIGIBLE_CONFIRMATIONS = 3
+REGISTRATION_CONFIRM_WAIT_TIMEOUT = 20.0
+REGISTRATION_CONFIRM_POLL_INTERVAL = 0.5
 EMAIL_RE = re.compile(r"(?i)[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}")
 PROXY_RE = re.compile(r"(?i)(https?|socks5)://[^/@\s]+@")
 JWT_RE = re.compile(r"\b[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\b")
@@ -371,6 +373,7 @@ async def browse(registration: Registration) -> str:
         await registration.log("registration page loaded")
         page = await registration.registration_loop(context)
         await registration.log("login detected; confirming trial status")
+        await confirm_registration_completion(page, registration.log)
         await wait_registration_trial(page, registration.log)
         await registration.log("trial status check finished; reading session")
         token = await read_access_token(page, registration.log)
@@ -405,6 +408,86 @@ async def close_context(registration: Registration) -> None:
     except BaseException as exc:
         if not isinstance(exc, asyncio.CancelledError):
             diagnostic("context close failed", exc, registration.secrets)
+
+
+REGISTRATION_COMPLETION_SCRIPT = r"""() => {
+    const visible = element => {
+        if (!element) return false;
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    const normalize = value => String(value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
+    const heading = Array.from(document.querySelectorAll('h1,h2,[role="heading"]')).find(visible);
+    const headingText = normalize(heading?.innerText || heading?.textContent);
+    const bodyText = normalize(document.body?.innerText);
+    const host = location.hostname.toLowerCase();
+    const authPage = host === 'auth.openai.com' || host.endsWith('.auth.openai.com');
+    const completionText = /(?:you'?re all set|you are all set|all set|tudo pronto|tudo certo|todo listo|tout est pret|alles ist bereit|tutto pronto|\u3059\u3079\u3066\u8a2d\u5b9a\u3055\u308c\u3066\u3044\u307e\u3059|\u6e96\u5099\u304c\u6574\u3044\u307e\u3057\u305f|\u6e96\u5099\u5b8c\u4e86|\u51c6\u5907\u597d\u4e86|\u4e00\u5207\u5c31\u7eea|\u5b8c\u6210\u4e86|\ubaa8\ub4e0 \uc900\ube44\uac00 \uc644\ub8cc\ub418\uc5c8\uc2b5\ub2c8\ub2e4|\ubaa8\ub4e0 \uc900\ube44\uac00 \ub418\uc5c8\uc2b5\ub2c8\ub2e4|\u0432\u0441\u0435 \u0433\u043e\u0442\u043e\u0432\u043e|\u0432\u0441\u0451 \u0433\u043e\u0442\u043e\u0432\u043e|her sey hazir|alt hazir|alles klaar|wszystko gotowe|c'est pret)/i;
+    const profileFields = Array.from(document.querySelectorAll('input,textarea,[contenteditable="true"]')).some(visible);
+    const completionPage = authPage && !profileFields && (completionText.test(headingText) || completionText.test(bodyText));
+    if (!completionPage) return {state: 'not_completion', heading: headingText};
+
+    const continueText = /^(?:continue|next|get started|start using chatgpt|continuar|proximo|avancar|comecar|seguir|continuer|suivant|weiter|fortfahren|continua|avanti|\u7d9a\u884c|\u7d9a\u3051\u308b|\u6b21\u3078|\uacc4\uc18d|\uacc4\uc18d\ud558\uae30|\ub2e4\uc74c|\u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0438\u0442\u044c|\u043d\u0430\u0447\u0430\u0442\u044c|devam|devam et|doorgaan|volgende|kontynuuj|\u0434\u0430\u043b\u0435\u0435|\u7ee7\u7eed|\u7e7c\u7e8c|\u5f00\u59cb\u4f7f\u7528|\u958b\u59cb\u4f7f\u7528|\u7ee7\u7eed\u4f7f\u7528|\u4e0b\u4e00\u6b65|\u062a\u0627\u0628\u0639|\u0645\u062a\u0627\u0628\u0639\u0629|\u05d4\u05de\u05e9\u05da|tiep tuc|lanjutkan|\u0e14\u0e33\u0e19\u0e34\u0e19\u0e01\u0e32\u0e23\u0e15\u0e48\u0e2d)$/i;
+    const candidates = Array.from(document.querySelectorAll('button,input[type="submit"],a,[role="button"]'))
+        .filter(element => visible(element) && !element.disabled && element.getAttribute('aria-disabled') !== 'true')
+        .map(element => ({
+            element,
+            label: normalize([
+                element.innerText,
+                element.value,
+                element.getAttribute('aria-label'),
+                element.getAttribute('title'),
+            ].filter(Boolean).join(' ')),
+        }));
+    const match = candidates.find(candidate => continueText.test(candidate.label));
+    const submit = candidates.filter(candidate => candidate.element.matches('button[type="submit"],input[type="submit"]'));
+    const target = match || (candidates.length === 1 ? candidates[0] : (submit.length === 1 ? submit[0] : null));
+    if (!target) return {state: 'button_waiting', heading: headingText, candidates: candidates.map(candidate => candidate.label).slice(0, 8)};
+    target.element.click();
+    return {state: 'clicked', heading: headingText, label: target.label};
+}"""
+
+
+async def confirm_registration_completion(
+    page: Any,
+    log: Optional[Callable[[str], Awaitable[None]]] = None,
+) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + REGISTRATION_CONFIRM_WAIT_TIMEOUT
+    clicked = False
+    logged_waiting = False
+    while loop.time() < deadline:
+        if clicked:
+            status, error = await probe_registration_trial(page)
+            if not error and status in {"eligible", "ineligible"}:
+                return
+            await asyncio.sleep(REGISTRATION_CONFIRM_POLL_INTERVAL)
+            continue
+        try:
+            result = await page.evaluate(REGISTRATION_COMPLETION_SCRIPT)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            result = {"state": "pending", "error": type(exc).__name__}
+        state = result.get("state") if isinstance(result, dict) else "pending"
+        if state == "not_completion":
+            return
+        if state == "clicked":
+            if not clicked and log is not None:
+                await log("registration completion page detected; confirming in localized UI")
+            clicked = True
+        elif state == "button_waiting" and not logged_waiting and log is not None:
+            await log("registration completion page detected; waiting for confirmation button")
+            logged_waiting = True
+        await asyncio.sleep(REGISTRATION_CONFIRM_POLL_INTERVAL)
+    if log is not None and clicked:
+        await log("registration completion confirmation submitted; page did not settle before trial check")
 
 
 async def wait_registration_trial(
