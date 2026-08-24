@@ -359,7 +359,7 @@ def close_late_context(registration: Registration, task: asyncio.Task[Any]) -> N
         pass
 
 
-async def browse(registration: Registration) -> str:
+async def browse(registration: Registration) -> dict[str, Any]:
     root = Path(__file__).resolve().parents[2] / ".cloakbrowser-profiles"
     root.mkdir(exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix=f"task-{registration.request_id[:12]}-", dir=root))
@@ -378,8 +378,23 @@ async def browse(registration: Registration) -> str:
         await registration.log("trial status check finished; reading session")
         token = await read_access_token(page, registration.log)
         registration.secrets.append(token)
+        cookies = await context.cookies()
+        device_id = next(
+            (str(cookie.get("value") or "") for cookie in cookies if cookie.get("name") == "oai-did"),
+            "",
+        )
+        session_cookies = [
+            {
+                "name": str(cookie.get("name") or ""),
+                "value": str(cookie.get("value") or ""),
+                "domain": str(cookie.get("domain") or ""),
+                "path": str(cookie.get("path") or "/"),
+            }
+            for cookie in cookies
+            if cookie.get("name") and cookie.get("value")
+        ]
         await registration.log("session token acquired")
-        return token
+        return {"access_token": token, "device_id": device_id, "cookies": session_cookies}
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -764,7 +779,7 @@ async def command_loop(registration: Registration, worker: asyncio.Task[str]) ->
             raise SidecarError("protocol_error", "unexpected input message type")
 
 
-async def run_registration(registration: Registration) -> str:
+async def run_registration(registration: Registration) -> dict[str, Any]:
     worker = asyncio.create_task(browse(registration))
     commands = asyncio.create_task(command_loop(registration, worker))
     try:
@@ -799,9 +814,9 @@ async def protocol_main(writer: JsonWriter) -> int:
         request_id = raw["request_id"]
         registration = Registration(writer, request_id, validate_start(raw))
         await writer.send(message("ready", request_id))
-        token = await run_registration(registration)
+        result = await run_registration(registration)
         await registration.flush_logs()
-        await writer.send(message("result", request_id, access_token=token))
+        await writer.send(message("result", request_id, **result))
         return 0
     except asyncio.CancelledError:
         if registration is not None:

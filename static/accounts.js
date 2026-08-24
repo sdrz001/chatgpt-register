@@ -680,7 +680,7 @@ async function copyMailboxLinks(ids) {
   if (!r.ok) return toast(d.error || '读取邮箱取件 URL 失败', true);
   const items = Array.isArray(d.items) ? d.items : [];
   if (!items.length) return toast('所选账号没有配置取件 URL', true);
-  const text = items.map(item => item.email + '----' + item.code_url).join('\n');
+  const text = items.map(item => item.line || (item.email + '----' + item.code_url)).join('\n');
   try {
     await copyText(text);
   } catch (e) {

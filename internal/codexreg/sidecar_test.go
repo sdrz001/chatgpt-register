@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"chatgpt-register/internal/openai2fa"
 )
 
 const (
@@ -322,6 +324,9 @@ func sidecarTestInput(t *testing.T, mode string) Input {
 		PythonExecutable: os.Args[0],
 		SidecarScript:    "-test.run=^TestSidecarHelperProcess$",
 		FetchCode:        func(context.Context) (string, error) { return "654321", nil },
+		EnableTwoFactor: func(context.Context, openai2fa.Session) (openai2fa.Result, error) {
+			return openai2fa.Result{Secret: "JBSWY3DPEHPK3PXP", FactorID: "factor-id", RecoveryCodes: []string{"recovery-code"}}, nil
+		},
 	}
 }
 

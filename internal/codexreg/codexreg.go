@@ -15,6 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"chatgpt-register/internal/openai2fa"
 )
 
 const (
@@ -48,15 +50,27 @@ type Input struct {
 
 	// SaveShot 保存注册失败时的页面截图(PNG)，用于事后排查（可为 nil）。
 	SaveShot func(png []byte)
+
+	EnableTwoFactor func(context.Context, openai2fa.Session) (openai2fa.Result, error)
+	CaptureSession  func(BrowserSession)
+}
+
+type BrowserSession struct {
+	AccessToken string
+	DeviceID    string
+	Cookies     []openai2fa.Cookie
 }
 
 // Result 生产结果。
 type Result struct {
-	AccessToken string         `json:"-"`
-	AuthJSON    map[string]any `json:"auth_json"` // 完整 auth.json
-	AccountID   string         `json:"account_id"`
-	UserID      string         `json:"user_id"`
-	PlanType    string         `json:"plan_type"`
+	AccessToken       string         `json:"-"`
+	AuthJSON          map[string]any `json:"auth_json"` // 完整 auth.json
+	AccountID         string         `json:"account_id"`
+	UserID            string         `json:"user_id"`
+	PlanType          string         `json:"plan_type"`
+	TOTPSecret        string         `json:"-"`
+	TOTPFactorID      string         `json:"-"`
+	TOTPRecoveryCodes []string       `json:"-"`
 }
 
 func (in Input) logf(format string, a ...any) {
@@ -69,6 +83,13 @@ type registrationError struct {
 	message string
 	cause   error
 }
+
+type twoFactorError struct {
+	cause error
+}
+
+func (e *twoFactorError) Error() string { return "自动设置 2FA 失败: " + e.cause.Error() }
+func (e *twoFactorError) Unwrap() error { return e.cause }
 
 func (e *registrationError) Error() string { return e.message }
 func (e *registrationError) Unwrap() error {
@@ -91,6 +112,9 @@ func Retryable(err error) (bool, bool) {
 	for err != nil {
 		if protocolErr, ok := err.(*sidecarProtocolError); ok {
 			return protocolErr.retryable, protocolErr.retryableKnown
+		}
+		if _, ok := err.(*twoFactorError); ok {
+			return false, true
 		}
 		if registrationErr, ok := err.(*registrationError); ok {
 			err = registrationErr.cause
@@ -153,6 +177,14 @@ func Register(ctx context.Context, in Input) (*Result, error) {
 		in.Password = GenPassword(16)
 	}
 
+	var session BrowserSession
+	captureSession := in.CaptureSession
+	in.CaptureSession = func(value BrowserSession) {
+		session = value
+		if captureSession != nil {
+			captureSession(value)
+		}
+	}
 	var accessToken string
 	if backend == BackendCloakBrowser {
 		accessToken, err = registerSidecar(ctx, in)
@@ -162,17 +194,45 @@ func Register(ctx context.Context, in Input) (*Result, error) {
 	if err != nil {
 		return nil, sanitizedError("ChatGPT 注册失败: ", err, in)
 	}
+	if session.AccessToken == "" {
+		session.AccessToken = accessToken
+	}
 
-	auth, accountID, userID, planType, err := buildAuthFromToken(in, accessToken)
+	var twoFactor openai2fa.Result
+	if flow == RegistrationFlowPassword {
+		in.logf("🔐 密码注册完成，正在自动启用 Authenticator 2FA...")
+		enable := in.EnableTwoFactor
+		if enable == nil {
+			enable = openai2fa.Enable
+		}
+		twoFactor, err = enable(ctx, openai2fa.Session{
+			AccessToken: session.AccessToken,
+			DeviceID:    session.DeviceID,
+			Cookies:     session.Cookies,
+			Proxy:       normalizeProxy(in.Proxy),
+		})
+		if err != nil {
+			return nil, sanitizedError("", &twoFactorError{cause: err}, in)
+		}
+		if strings.TrimSpace(twoFactor.Secret) == "" {
+			return nil, sanitizedError("", &twoFactorError{cause: errors.New("服务端未返回 TOTP secret")}, in)
+		}
+		in.logf("✅ Authenticator 2FA 已启用")
+	}
+
+	auth, accountID, userID, planType, err := buildAuthFromToken(in, session.AccessToken)
 	if err != nil {
 		return nil, sanitizedError("", err, in)
 	}
 
 	return &Result{
-		AccessToken: accessToken,
-		AuthJSON:    auth,
-		AccountID:   accountID,
-		UserID:      userID,
-		PlanType:    planType,
+		AccessToken:       session.AccessToken,
+		AuthJSON:          auth,
+		AccountID:         accountID,
+		UserID:            userID,
+		PlanType:          planType,
+		TOTPSecret:        twoFactor.Secret,
+		TOTPFactorID:      twoFactor.FactorID,
+		TOTPRecoveryCodes: append([]string(nil), twoFactor.RecoveryCodes...),
 	}, nil
 }

@@ -1,6 +1,7 @@
 package codexreg
 
 import (
+	"chatgpt-register/internal/openai2fa"
 	"context"
 	"strings"
 	"testing"
@@ -41,6 +42,45 @@ func TestRegistrationLauncherLoadsAllResources(t *testing.T) {
 	launcher := registrationLauncher(true)
 	if value := launcher.Get("blink-settings"); value != "" {
 		t.Fatalf("blink-settings=%q", value)
+	}
+}
+
+func TestPasswordRegistrationRequiresTwoFactor(t *testing.T) {
+	original := browserRegister
+	defer func() { browserRegister = original }()
+	browserRegister = func(context.Context, Input) (string, error) { return sidecarTestToken(), nil }
+	called := false
+	result, err := Register(context.Background(), Input{
+		Email: "password@example.test", Password: "password", FullName: "Password User", Age: "25",
+		RegistrationFlow: RegistrationFlowPassword, FetchCode: func(context.Context) (string, error) { return "123456", nil },
+		EnableTwoFactor: func(_ context.Context, session openai2fa.Session) (openai2fa.Result, error) {
+			called = true
+			if session.AccessToken != sidecarTestToken() {
+				t.Fatalf("access token=%q", session.AccessToken)
+			}
+			return openai2fa.Result{Secret: "JBSWY3DPEHPK3PXP", FactorID: "factor", RecoveryCodes: []string{"recovery"}}, nil
+		},
+	})
+	if err != nil || !called || result.TOTPSecret != "JBSWY3DPEHPK3PXP" || result.TOTPFactorID != "factor" || len(result.TOTPRecoveryCodes) != 1 {
+		t.Fatalf("result=%+v err=%v called=%v", result, err, called)
+	}
+}
+
+func TestEmailCodeRegistrationDoesNotEnableTwoFactor(t *testing.T) {
+	original := browserRegister
+	defer func() { browserRegister = original }()
+	browserRegister = func(context.Context, Input) (string, error) { return sidecarTestToken(), nil }
+	called := false
+	result, err := Register(context.Background(), Input{
+		Email: "email-code@example.test", Password: "password", FullName: "Email Code User", Age: "25",
+		RegistrationFlow: RegistrationFlowEmailCode, FetchCode: func(context.Context) (string, error) { return "123456", nil },
+		EnableTwoFactor: func(context.Context, openai2fa.Session) (openai2fa.Result, error) {
+			called = true
+			return openai2fa.Result{Secret: "unexpected"}, nil
+		},
+	})
+	if err != nil || called || result.TOTPSecret != "" {
+		t.Fatalf("result=%+v err=%v called=%v", result, err, called)
 	}
 }
 

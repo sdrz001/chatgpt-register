@@ -275,7 +275,7 @@ func (h *Handler) RegistrationMailboxLinks(c *gin.Context) {
 	}
 
 	var regs []models.Registration
-	if err := h.DB.Select("id", "email", "mailbox_id").Where("id IN ?", in.IDs).Find(&regs).Error; err != nil {
+	if err := h.DB.Select("id", "email", "password", "registration_flow", "two_factor_enabled", "two_factor_secret", "mailbox_id").Where("id IN ?", in.IDs).Find(&regs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -303,7 +303,10 @@ func (h *Handler) RegistrationMailboxLinks(c *gin.Context) {
 	type mailboxLink struct {
 		RegistrationID uint   `json:"registration_id"`
 		Email          string `json:"email"`
+		Password       string `json:"-"`
+		TOTPSecret     string `json:"-"`
 		CodeURL        string `json:"code_url"`
+		Line           string `json:"line"`
 	}
 	items := make([]mailboxLink, 0, len(in.IDs))
 	for _, id := range in.IDs {
@@ -316,7 +319,26 @@ func (h *Handler) RegistrationMailboxLinks(c *gin.Context) {
 		if !exists || codeURL == "" {
 			continue
 		}
-		items = append(items, mailboxLink{RegistrationID: reg.ID, Email: reg.Email, CodeURL: codeURL})
+		password := ""
+		totpSecret := ""
+		if strings.EqualFold(strings.TrimSpace(reg.RegistrationFlow), "password") {
+			password = strings.TrimSpace(reg.Password)
+			if reg.TwoFactorEnabled {
+				totpSecret = strings.TrimSpace(reg.TwoFactorSecret)
+			}
+		}
+		parts := []string{reg.Email}
+		if password != "" {
+			parts = append(parts, password)
+		}
+		if totpSecret != "" {
+			parts = append(parts, totpSecret)
+		}
+		parts = append(parts, codeURL)
+		items = append(items, mailboxLink{
+			RegistrationID: reg.ID, Email: reg.Email, Password: password,
+			TOTPSecret: totpSecret, CodeURL: codeURL, Line: strings.Join(parts, "----"),
+		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{

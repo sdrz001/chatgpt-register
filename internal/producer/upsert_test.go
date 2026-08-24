@@ -362,6 +362,33 @@ func TestUpsertClearsStaleFailureShotOnRetryAndSuccess(t *testing.T) {
 	}
 }
 
+func TestUpsertPersistsPasswordAndTwoFactorCredentials(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Registration{}); err != nil {
+		t.Fatal(err)
+	}
+	existing := models.Registration{Email: "password@example.test", Status: "registering"}
+	if err := database.Create(&existing).Error; err != nil {
+		t.Fatal(err)
+	}
+	producer := &Producer{db: database}
+	producer.upsert(models.Registration{
+		Email: existing.Email, Password: "generated-password", RegistrationFlow: "password", Status: "registered",
+		AuthData: `{"access_token":"token"}`, TwoFactorEnabled: true, TwoFactorSecret: "TOTP-SECRET",
+		TwoFactorFactorID: "FACTOR-ID", TwoFactorRecoveryCodes: `["RECOVERY-1"]`,
+	})
+	var reloaded models.Registration
+	if err := database.First(&reloaded, existing.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Password != "generated-password" || reloaded.RegistrationFlow != "password" || !reloaded.TwoFactorEnabled || reloaded.TwoFactorSecret != "TOTP-SECRET" || reloaded.TwoFactorFactorID != "FACTOR-ID" || reloaded.TwoFactorRecoveryCodes != `["RECOVERY-1"]` {
+		t.Fatalf("registration=%+v", reloaded)
+	}
+}
+
 func TestUpsertWithNewAuthResetsTrialEligibility(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

@@ -469,6 +469,10 @@ func (p *Producer) mailAccount(mailbox models.Mailbox) (mailfetch.Account, error
 
 func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox, email string, isMother bool) error {
 	password := p.registrationPassword(email)
+	storedPassword := ""
+	if cfg.RegistrationFlow == codexreg.RegistrationFlowPassword {
+		storedPassword = password
+	}
 	accountProxy := p.nextProxy(cfg)
 	exit := codexreg.ExitLocation{}
 	if cfg.BrowserBackend == codexreg.BackendCloakBrowser {
@@ -486,7 +490,7 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 		}
 	}
 	p.upsert(models.Registration{
-		Email: email, MailboxID: mb.ID, Password: password, Proxy: accountProxy,
+		Email: email, MailboxID: mb.ID, Password: storedPassword, RegistrationFlow: cfg.RegistrationFlow, Proxy: accountProxy,
 		RegisterCountry: exit.Country, RegisterIP: exit.IP, RegisterCity: exit.City,
 		Status: "registering", IsMother: isMother, Note: note, CategoryID: categoryID,
 	})
@@ -587,14 +591,16 @@ func (p *Producer) produceOne(ctx context.Context, cfg Config, mb models.Mailbox
 
 	appendLog("✓ 注册成功")
 	authBytes, _ := json.MarshalIndent(res.AuthJSON, "", "  ")
+	recoveryCodes, _ := json.Marshal(res.TOTPRecoveryCodes)
 	now := time.Now()
 	_, expiresAt, _ := codexreg.AccessTokenDetails(res.AccessToken)
 	exit = codexreg.MergeExitLocation(exit, codexreg.ParseRegisterLocation(logBuf.String()))
 	p.upsert(models.Registration{
-		Email: email, MailboxID: mb.ID, Password: password, Proxy: accountProxy,
+		Email: email, MailboxID: mb.ID, Password: storedPassword, RegistrationFlow: cfg.RegistrationFlow, Proxy: accountProxy,
 		RegisterCountry: exit.Country, RegisterIP: exit.IP, RegisterCity: exit.City,
 		Status: "registered", IsMother: isMother, Note: note, CategoryID: categoryID,
-		AuthData: string(authBytes), AccountID: res.AccountID,
+		AuthData: string(authBytes), TwoFactorEnabled: strings.TrimSpace(res.TOTPSecret) != "", TwoFactorSecret: res.TOTPSecret,
+		TwoFactorFactorID: res.TOTPFactorID, TwoFactorRecoveryCodes: string(recoveryCodes), AccountID: res.AccountID,
 		UserID: res.UserID, PlanType: res.PlanType, ATStatus: "valid", TrialStatus: "unchecked",
 		ATCheckedAt: &now, ATExpiresAt: expiresAt, Log: logBuf.String(),
 	})
@@ -917,7 +923,7 @@ func (p *Producer) upsert(reg models.Registration) {
 	var existing models.Registration
 	if err := p.db.Where("email = ?", reg.Email).First(&existing).Error; err == nil {
 		updates := map[string]any{
-			"password": reg.Password, "status": reg.Status,
+			"password": reg.Password, "registration_flow": reg.RegistrationFlow, "status": reg.Status,
 			"is_mother": reg.IsMother, "note": reg.Note, "mailbox_id": reg.MailboxID,
 			"proxy": reg.Proxy, "category_id": reg.CategoryID,
 			"register_country": reg.RegisterCountry, "register_ip": reg.RegisterIP, "register_city": reg.RegisterCity,
@@ -928,6 +934,10 @@ func (p *Producer) upsert(reg models.Registration) {
 		if reg.AuthData != "" {
 			updates["shot"] = nil
 			updates["auth_data"] = reg.AuthData
+			updates["two_factor_enabled"] = reg.TwoFactorEnabled
+			updates["two_factor_secret"] = reg.TwoFactorSecret
+			updates["two_factor_factor_id"] = reg.TwoFactorFactorID
+			updates["two_factor_recovery_codes"] = reg.TwoFactorRecoveryCodes
 			updates["account_id"] = reg.AccountID
 			updates["user_id"] = reg.UserID
 			updates["plan_type"] = reg.PlanType

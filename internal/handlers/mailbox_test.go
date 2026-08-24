@@ -386,16 +386,16 @@ func TestRegistrationMailboxLinksReturnsSelectedOrderAndSkipsMissingURL(t *testi
 	handler, router := mailboxTestHandler(t)
 	mailboxes := []models.Mailbox{
 		{Email: "first@example.test", CodeURL: "https://codes.example.test/first?token=one", Status: "verified"},
-		{Email: "second@example.test", Status: "verified"},
+		{Email: "second@example.test", CodeURL: "https://codes.example.test/second?token=two", Status: "verified"},
 		{Email: "third@example.test", CodeURL: "https://codes.example.test/third?token=three", Status: "verified"},
 	}
 	if err := handler.DB.Create(&mailboxes).Error; err != nil {
 		t.Fatal(err)
 	}
 	registrations := []models.Registration{
-		{Email: "first+account@example.test", MailboxID: mailboxes[0].ID},
-		{Email: "second+account@example.test", MailboxID: mailboxes[1].ID},
-		{Email: "third+account@example.test", MailboxID: mailboxes[2].ID},
+		{Email: "first+account@example.test", MailboxID: mailboxes[0].ID, Password: "first-password", RegistrationFlow: "password", TwoFactorEnabled: true, TwoFactorSecret: "FIRST-2FA"},
+		{Email: "second+account@example.test", MailboxID: mailboxes[1].ID, Password: "second-password", RegistrationFlow: "password"},
+		{Email: "third+account@example.test", MailboxID: mailboxes[2].ID, Password: "legacy-password", RegistrationFlow: "email_code"},
 	}
 	if err := handler.DB.Create(&registrations).Error; err != nil {
 		t.Fatal(err)
@@ -414,6 +414,7 @@ func TestRegistrationMailboxLinksReturnsSelectedOrderAndSkipsMissingURL(t *testi
 			RegistrationID uint   `json:"registration_id"`
 			Email          string `json:"email"`
 			CodeURL        string `json:"code_url"`
+			Line           string `json:"line"`
 		} `json:"items"`
 		Count   int `json:"count"`
 		Skipped int `json:"skipped"`
@@ -421,13 +422,16 @@ func TestRegistrationMailboxLinksReturnsSelectedOrderAndSkipsMissingURL(t *testi
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Count != 2 || result.Skipped != 2 || len(result.Items) != 2 {
+	if result.Count != 3 || result.Skipped != 1 || len(result.Items) != 3 {
 		t.Fatalf("result=%+v", result)
 	}
-	if result.Items[0].RegistrationID != registrations[2].ID || result.Items[0].Email != registrations[2].Email || result.Items[0].CodeURL != mailboxes[2].CodeURL {
+	if result.Items[0].RegistrationID != registrations[2].ID || result.Items[0].Email != registrations[2].Email || result.Items[0].CodeURL != mailboxes[2].CodeURL || result.Items[0].Line != "third+account@example.test----"+mailboxes[2].CodeURL {
 		t.Fatalf("first item=%+v", result.Items[0])
 	}
-	if result.Items[1].RegistrationID != registrations[0].ID || result.Items[1].Email != registrations[0].Email || result.Items[1].CodeURL != mailboxes[0].CodeURL {
+	if result.Items[1].RegistrationID != registrations[1].ID || result.Items[1].Email != registrations[1].Email || result.Items[1].CodeURL != mailboxes[1].CodeURL || result.Items[1].Line != "second+account@example.test----second-password----"+mailboxes[1].CodeURL {
 		t.Fatalf("second item=%+v", result.Items[1])
+	}
+	if result.Items[2].RegistrationID != registrations[0].ID || result.Items[2].Email != registrations[0].Email || result.Items[2].CodeURL != mailboxes[0].CodeURL || result.Items[2].Line != "first+account@example.test----first-password----FIRST-2FA----"+mailboxes[0].CodeURL {
+		t.Fatalf("third item=%+v", result.Items[2])
 	}
 }

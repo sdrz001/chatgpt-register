@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"chatgpt-register/internal/openai2fa"
 )
 
 const (
@@ -59,14 +61,23 @@ type sidecarStartPayload struct {
 }
 
 type sidecarMessage struct {
-	Version     int    `json:"version"`
-	Type        string `json:"type"`
-	RequestID   string `json:"request_id"`
-	Message     string `json:"message,omitempty"`
-	Code        string `json:"code,omitempty"`
-	Data        string `json:"data,omitempty"`
-	AccessToken string `json:"access_token,omitempty"`
-	Retryable   *bool  `json:"retryable,omitempty"`
+	Version     int             `json:"version"`
+	Type        string          `json:"type"`
+	RequestID   string          `json:"request_id"`
+	Message     string          `json:"message,omitempty"`
+	Code        string          `json:"code,omitempty"`
+	Data        string          `json:"data,omitempty"`
+	AccessToken string          `json:"access_token,omitempty"`
+	DeviceID    string          `json:"device_id,omitempty"`
+	Cookies     []sidecarCookie `json:"cookies,omitempty"`
+	Retryable   *bool           `json:"retryable,omitempty"`
+}
+
+type sidecarCookie struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Domain string `json:"domain"`
+	Path   string `json:"path"`
 }
 
 type sidecarProtocolError struct {
@@ -229,6 +240,15 @@ func (s *sidecarSession) handle(message sidecarMessage) (bool, error) {
 		s.token = strings.TrimSpace(message.AccessToken)
 		if s.token == "" {
 			return false, errors.New("sidecar result 缺少 access_token")
+		}
+		session := BrowserSession{AccessToken: s.token, DeviceID: strings.TrimSpace(message.DeviceID)}
+		for _, cookie := range message.Cookies {
+			session.Cookies = append(session.Cookies, openai2fa.Cookie{
+				Name: cookie.Name, Value: cookie.Value, Domain: cookie.Domain, Path: cookie.Path,
+			})
+		}
+		if s.input.CaptureSession != nil {
+			s.input.CaptureSession(session)
 		}
 		return true, nil
 	case "error":

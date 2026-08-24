@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"chatgpt-register/internal/openai2fa"
+
 	"github.com/go-rod/rod"
 	rodinput "github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/launcher"
@@ -371,6 +373,22 @@ func registerBrowser(ctx context.Context, in Input) (token string, err error) {
 	accessToken, ok := sessionData["accessToken"].(string)
 	if !ok || accessToken == "" {
 		return "", fmt.Errorf("未找到 accessToken，可能未登录成功")
+	}
+	cookies, err := browser.GetCookies()
+	if err != nil {
+		return "", fmt.Errorf("读取登录会话 Cookie 失败: %w", err)
+	}
+	session := BrowserSession{AccessToken: accessToken}
+	for _, cookie := range cookies {
+		session.Cookies = append(session.Cookies, openai2fa.Cookie{
+			Name: cookie.Name, Value: cookie.Value, Domain: cookie.Domain, Path: cookie.Path,
+		})
+		if cookie.Name == "oai-did" {
+			session.DeviceID = cookie.Value
+		}
+	}
+	if in.CaptureSession != nil {
+		in.CaptureSession(session)
 	}
 	in.logf("🔑 accessToken 获取成功，正在关闭浏览器")
 	return accessToken, nil
