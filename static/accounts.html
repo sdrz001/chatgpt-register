@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>账户管理 · ChatGPT 注册管理</title>
-<link rel="stylesheet" href="/static/style.css?v=21">
+<link rel="stylesheet" href="/static/style.css?v=22">
 </head>
 <body data-page="accounts">
 <div class="layout">
@@ -53,6 +53,16 @@
         <option value="business">Business</option>
         <option value="enterprise">Enterprise</option>
         <option value="edu">Edu</option>
+      </select>
+      <select id="filter-password" class="px-input">
+        <option value="">全部密码</option>
+        <option value="yes">有密码</option>
+        <option value="no">无密码</option>
+      </select>
+      <select id="filter-two-factor" class="px-input">
+        <option value="">全部 2FA</option>
+        <option value="yes">已启用 2FA</option>
+        <option value="no">未启用 2FA</option>
       </select>
       <select id="filter-trial-status" class="px-input">
         <option value="">全部试用资格</option>
@@ -115,7 +125,7 @@
       <table class="px-table">
         <thead><tr>
           <th class="col-check"><input type="checkbox" id="acc-check-all" onclick="toggleSelectAll(this.checked)"></th>
-          <th>邮箱</th><th>分类</th><th>注册地</th><th>AT 状态</th><th>套餐</th><th>0元试用</th><th>Plus 邮件</th><th>注册状态</th><th>Codex</th><th>Sub2API</th><th>出库</th><th>操作</th>
+          <th>邮箱</th><th>分类</th><th>注册地</th><th>凭据</th><th>AT 状态</th><th>套餐</th><th>0元试用</th><th>Plus 邮件</th><th>注册状态</th><th>Codex</th><th>Sub2API</th><th>出库</th><th>操作</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
@@ -166,6 +176,6 @@
 
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js?v=2"></script>
-<script src="/static/accounts.js?v=26"></script>
+<script src="/static/accounts.js?v=27"></script>
 </body>
 </html>

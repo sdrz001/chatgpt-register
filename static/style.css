@@ -300,6 +300,31 @@ select.px-input option { background: #fff; }
 .px-table tbody tr { transition: background .12s; }
 .px-table tbody tr:hover td { background: #faf8ff; }
 
+body[data-page="accounts"] .toolbar { gap: 6px; }
+body[data-page="accounts"] .toolbar > .px-input,
+body[data-page="accounts"] .toolbar > .px-select { min-width: 112px; }
+body[data-page="accounts"] .toolbar > .search { min-width: 210px; }
+body[data-page="accounts"] .px-table th,
+body[data-page="accounts"] .px-table td { padding: 8px 9px; }
+body[data-page="accounts"] .px-table th { font-size: 11.5px; }
+body[data-page="accounts"] .px-table td { font-size: 12px; }
+body[data-page="accounts"] .badge,
+body[data-page="accounts"] .plan-badge,
+body[data-page="accounts"] .category-chip,
+body[data-page="accounts"] .country-chip { padding: 2px 7px; font-size: 11px; }
+body[data-page="accounts"] .badge::before { width: 5px; height: 5px; }
+body[data-page="accounts"] .account-email-cell { width: 210px; min-width: 210px; max-width: 210px; }
+body[data-page="accounts"] .account-actions-cell { min-width: 210px; }
+body[data-page="accounts"] .icon-btn { width: 22px; height: 25px; flex-basis: 22px; }
+body[data-page="accounts"] .account-actions { gap: 0; }
+.credential-cell { white-space: nowrap; }
+.credential-flag {
+  display: inline-flex; align-items: center; margin-right: 4px; padding: 2px 5px;
+  border-radius: 5px; font-size: 10px; line-height: 1.2; font-weight: 600;
+}
+.credential-flag.is-present { color: var(--green); background: rgba(22, 163, 74, .12); }
+.credential-flag.is-missing { color: var(--text-3); background: rgba(120, 130, 160, .12); }
+
 /* ===== 状态徽章 ===== */
 .badge {
   display: inline-flex; align-items: center; gap: 6px;

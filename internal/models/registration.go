@@ -11,16 +11,17 @@ import "time"
 // 生产成功后 AuthData 存完整的 auth.json（access_token + 账号信息），下载时导出。
 // Shipped 表示是否已"出库"（下载即出库）。
 type Registration struct {
-	ID               uint   `gorm:"primaryKey" json:"id"`
-	Email            string `gorm:"size:255;not null;uniqueIndex" json:"email"`
-	MailboxID        uint   `gorm:"index" json:"mailbox_id"`
-	Password         string `gorm:"size:255" json:"-"`
-	Username         string `gorm:"size:255" json:"username"`
-	RegistrationFlow string `gorm:"column:registration_flow;size:32;not null;default:email_code;index" json:"registration_flow"`
-	Proxy            string `gorm:"type:text" json:"-"`
-	RegisterCountry  string `gorm:"column:register_country;size:8;index" json:"register_country"`
-	RegisterIP       string `gorm:"column:register_ip;size:64" json:"register_ip"`
-	RegisterCity     string `gorm:"column:register_city;size:64" json:"register_city"`
+	ID                 uint   `gorm:"primaryKey" json:"id"`
+	Email              string `gorm:"size:255;not null;uniqueIndex" json:"email"`
+	MailboxID          uint   `gorm:"index" json:"mailbox_id"`
+	Password           string `gorm:"size:255" json:"-"`
+	PasswordConfigured bool   `gorm:"-" json:"password_configured"`
+	Username           string `gorm:"size:255" json:"username"`
+	RegistrationFlow   string `gorm:"column:registration_flow;size:32;not null;default:email_code;index" json:"registration_flow"`
+	Proxy              string `gorm:"type:text" json:"-"`
+	RegisterCountry    string `gorm:"column:register_country;size:8;index" json:"register_country"`
+	RegisterIP         string `gorm:"column:register_ip;size:64" json:"register_ip"`
+	RegisterCity       string `gorm:"column:register_city;size:64" json:"register_city"`
 
 	Status  string `gorm:"size:32;default:pending" json:"status"`
 	Shipped bool   `gorm:"default:false" json:"shipped"` // 出库状态：true=已出库

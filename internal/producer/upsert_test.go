@@ -362,6 +362,39 @@ func TestUpsertClearsStaleFailureShotOnRetryAndSuccess(t *testing.T) {
 	}
 }
 
+func TestUpsertRefreshesCreatedAtWhenRetryingRegistration(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Registration{}); err != nil {
+		t.Fatal(err)
+	}
+	initialTime := time.Date(2026, time.August, 23, 17, 22, 34, 0, time.UTC)
+	existing := models.Registration{Email: "retry@example.test", Status: "register_failed", CreatedAt: initialTime}
+	if err := database.Create(&existing).Error; err != nil {
+		t.Fatal(err)
+	}
+	producer := &Producer{db: database}
+	producer.upsert(models.Registration{Email: existing.Email, Status: "registering"})
+	var retrying models.Registration
+	if err := database.First(&retrying, existing.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !retrying.CreatedAt.After(initialTime) {
+		t.Fatalf("retry created_at=%v initial=%v", retrying.CreatedAt, initialTime)
+	}
+	retryTime := retrying.CreatedAt
+	producer.setRegistrationFailed(existing.Email, "retry failed", "")
+	var failed models.Registration
+	if err := database.First(&failed, existing.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !failed.CreatedAt.Equal(retryTime) {
+		t.Fatalf("failed created_at=%v retry=%v", failed.CreatedAt, retryTime)
+	}
+}
+
 func TestUpsertPersistsPasswordAndTwoFactorCredentials(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

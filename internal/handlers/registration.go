@@ -118,6 +118,20 @@ func (h *Handler) List(c *gin.Context) {
 	if s := c.Query("plan_type"); s != "" {
 		q = q.Where("LOWER(plan_type) = ?", strings.ToLower(s))
 	}
+	if s := c.Query("password"); s != "" {
+		if s == "yes" {
+			q = q.Where("TRIM(password) <> ''")
+		} else if s == "no" {
+			q = q.Where("TRIM(password) = '' OR password IS NULL")
+		}
+	}
+	if s := c.Query("two_factor"); s != "" {
+		if s == "yes" {
+			q = q.Where("two_factor_enabled = ?", true)
+		} else if s == "no" {
+			q = q.Where("two_factor_enabled = ? OR two_factor_enabled IS NULL", false)
+		}
+	}
 	if s := c.Query("category_id"); s != "" {
 		if s == "uncategorized" {
 			q = q.Where("category_id IS NULL")
@@ -152,6 +166,8 @@ func (h *Handler) List(c *gin.Context) {
 		} else if h.autoATCheck.Load() {
 			h.scheduleATCheck(regs[i], false)
 		}
+		regs[i].PasswordConfigured = strings.TrimSpace(regs[i].Password) != ""
+		regs[i].Password = ""
 		regs[i].AuthData = ""
 		regs[i].Log = ""
 	}
@@ -165,6 +181,8 @@ func (h *Handler) Get(c *gin.Context) {
 		return
 	}
 	// 不在通用接口返回私钥/完整 auth，仅下载接口按需返回
+	reg.PasswordConfigured = strings.TrimSpace(reg.Password) != ""
+	reg.Password = ""
 	reg.AuthData = ""
 	c.JSON(http.StatusOK, reg)
 }

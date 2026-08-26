@@ -930,6 +930,7 @@ func (p *Producer) upsert(reg models.Registration) {
 		}
 		if reg.Status == "registering" {
 			updates["shot"] = nil
+			updates["created_at"] = time.Now()
 		}
 		if reg.AuthData != "" {
 			updates["shot"] = nil

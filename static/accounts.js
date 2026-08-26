@@ -60,6 +60,8 @@ async function load() {
   const status = document.getElementById('filter-status').value;
   const atStatus = document.getElementById('filter-at-status').value;
   const plan = document.getElementById('filter-plan').value;
+  const password = document.getElementById('filter-password').value;
+  const twoFactor = document.getElementById('filter-two-factor').value;
   const trialStatus = document.getElementById('filter-trial-status').value;
   const registerCountry = document.getElementById('filter-register-country').value;
   const category = document.getElementById('filter-account-category').value;
@@ -68,6 +70,8 @@ async function load() {
   if (status) params.set('status', status);
   if (atStatus) params.set('at_status', atStatus);
   if (plan) params.set('plan_type', plan);
+  if (password) params.set('password', password);
+  if (twoFactor) params.set('two_factor', twoFactor);
   if (trialStatus) params.set('trial_status', trialStatus);
   if (registerCountry) params.set('register_country', registerCountry);
   if (category) params.set('category_id', category);
@@ -77,7 +81,7 @@ async function load() {
   accTotal = d.total || 0;
   (d.data || []).forEach(x => { accCache[x.id] = x; });
   document.getElementById('rows').innerHTML = (d.data || []).map(rowHtml).join('')
-    || '<tr><td colspan="13" style="text-align:center;color:var(--text-3)">暂无数据</td></tr>';
+    || '<tr><td colspan="14" style="text-align:center;color:var(--text-3)">暂无数据</td></tr>';
   syncCountryFilter(d.data || []);
   const maxPage = Math.max(1, Math.ceil((d.total || 0) / size));
   renderPager('pager', page, maxPage, p => { page = p; load(); });
@@ -175,12 +179,15 @@ function rowHtml(x) {
     x.trial_checked_at ? '检测时间：' + fmtTime(x.trial_checked_at) : '',
   ].filter(Boolean).join('\n');
   const plan = String(x.plan_type || '').toLowerCase();
+  const hasPassword = x.password_configured === true;
+  const hasTwoFactor = x.two_factor_enabled === true;
   return `
     <tr class="${accSelected.has(x.id) ? 'row-sel' : ''}">
       <td class="col-check"><input type="checkbox" ${accSelected.has(x.id) ? 'checked' : ''} onclick="toggleSelect(${x.id}, this.checked)"></td>
       <td class="account-email-cell"><div class="account-email" title="${esc(x.email)}">${esc(x.email)}</div><div class="table-sub">${fmtTime(x.created_at)}</div></td>
       <td>${x.category ? `<span class="category-chip">${esc(x.category.name)}</span>` : '<span class="table-muted">未分类</span>'}</td>
       <td>${registerCountryCell(x)}</td>
+      <td class="credential-cell"><span class="credential-flag ${hasPassword ? 'is-present' : 'is-missing'}" title="${hasPassword ? '有密码' : '无密码'}">密码</span><span class="credential-flag ${hasTwoFactor ? 'is-present' : 'is-missing'}" title="${hasTwoFactor ? '已启用 2FA' : '未启用 2FA'}">2FA</span></td>
       <td><span class="badge at-${esc(atStatus)}" title="${esc(atTitle)}">${AT_STATUS[atStatus] || esc(atStatus)}</span></td>
       <td><span class="plan-badge plan-${esc(plan || 'unknown')}">${PLAN_LABEL[plan] || esc(plan || '未知')}</span></td>
       <td><span class="badge trial-${esc(trialStatus)}" title="${esc(trialTitle)}">${TRIAL_STATUS[trialStatus] || esc(trialStatus)}</span></td>
@@ -776,7 +783,7 @@ async function del(id) {
 document.getElementById('search').addEventListener('keydown', e => {
   if (e.key === 'Enter') { page = 1; load(); }
 });
-['filter-status', 'filter-at-status', 'filter-plan', 'filter-trial-status', 'filter-register-country', 'filter-account-category'].forEach(id => {
+['filter-status', 'filter-at-status', 'filter-plan', 'filter-password', 'filter-two-factor', 'filter-trial-status', 'filter-register-country', 'filter-account-category'].forEach(id => {
   document.getElementById(id).addEventListener('change', () => { page = 1; load(); });
 });
 document.getElementById('new-account-category').addEventListener('keydown', event => {

@@ -229,6 +229,47 @@ func TestRegistrationListFiltersTrialStatus(t *testing.T) {
 	}
 }
 
+func TestRegistrationListFiltersPasswordAndTwoFactor(t *testing.T) {
+	handler, router := integrationHandlerTestRouter(t)
+	registrations := []models.Registration{
+		{Email: "password-2fa@example.test", Status: "registered", Password: "secret", TwoFactorEnabled: true},
+		{Email: "password-only@example.test", Status: "registered", Password: "secret", TwoFactorEnabled: false},
+		{Email: "no-password@example.test", Status: "registered", TwoFactorEnabled: false},
+	}
+	if err := handler.DB.Create(&registrations).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		query string
+		want  string
+		hide  string
+	}{
+		{query: "password=yes", want: "password-only@example.test", hide: "no-password@example.test"},
+		{query: "password=no", want: "no-password@example.test", hide: "password-only@example.test"},
+		{query: "two_factor=yes", want: "password-2fa@example.test", hide: "password-only@example.test"},
+		{query: "two_factor=no", want: "password-only@example.test", hide: "password-2fa@example.test"},
+	} {
+		t.Run(test.query, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/registrations?"+test.query, nil))
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), test.want) || strings.Contains(response.Body.String(), test.hide) || strings.Contains(response.Body.String(), "secret") {
+				t.Fatalf("query=%s status=%d body=%s", test.query, response.Code, response.Body.String())
+			}
+		})
+	}
+	var body struct {
+		Data []models.Registration `json:"data"`
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/registrations?password=yes&two_factor=yes", nil))
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Data) != 1 || !body.Data[0].PasswordConfigured || !body.Data[0].TwoFactorEnabled {
+		t.Fatalf("data=%+v", body.Data)
+	}
+}
+
 func TestRegistrationListFiltersRegisterCountry(t *testing.T) {
 	handler, router := integrationHandlerTestRouter(t)
 	registrations := []models.Registration{
