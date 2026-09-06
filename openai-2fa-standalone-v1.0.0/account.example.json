@@ -1,0 +1,15 @@
+{
+  "email": "ACCOUNT@example.com",
+  "access_token": "ACCESS_TOKEN",
+  "chatgpt_session_token": "SESSION_TOKEN",
+  "chatgpt_cookies": [
+    {
+      "name": "oai-did",
+      "value": "DEVICE_COOKIE",
+      "domain": ".openai.com",
+      "path": "/"
+    }
+  ],
+  "chatgpt_device_id": "DEVICE_ID",
+  "proxy": ""
+}

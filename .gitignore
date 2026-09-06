@@ -15,3 +15,5 @@ chatgpt-register-local.exe
 .venv/
 .cloakbrowser-profiles/
 __pycache__/
+/bin/
+*.zip

@@ -1,0 +1,37 @@
+﻿{
+    "name":  "openai-2fa-standalone",
+    "version":  "1.0.0",
+    "created_at":  "2026-07-31T23:42:04+08:00",
+    "files":  [
+                  {
+                      "name":  "account.example.json",
+                      "bytes":  312,
+                      "sha256":  "92ec84778126ef48c29ec191f12c97d336e92e970f4328d9524a34e612787bb4"
+                  },
+                  {
+                      "name":  "enable_2fa.py",
+                      "bytes":  1928,
+                      "sha256":  "622df5273fdac8d2f105139e0e24555675b67189775bffa4b137dbc40d98e3b4"
+                  },
+                  {
+                      "name":  "openai_2fa.py",
+                      "bytes":  10243,
+                      "sha256":  "8b24a07b1ce85abc6d91ccae951185c9f64941ff70d17fc9714e32b8d4eda197"
+                  },
+                  {
+                      "name":  "README.md",
+                      "bytes":  1639,
+                      "sha256":  "3241827660f29cc6eafb6ecfeea7f88fed4b65c682863df4c07686dcb8b8a9dc"
+                  },
+                  {
+                      "name":  "requirements.txt",
+                      "bytes":  24,
+                      "sha256":  "6a82443aa22020c18ba5c0815a1b929e4134165b1c79f85c74f31741c151f924"
+                  },
+                  {
+                      "name":  "test_openai_2fa.py",
+                      "bytes":  3038,
+                      "sha256":  "c60f98ea6d505c5e27c88536613b241e15ca9af4beb8c6dae815fa0041db90e1"
+                  }
+              ]
+}
